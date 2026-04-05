@@ -1,0 +1,4 @@
+name: sinkhorn
+reg: 0.05
+fit_samples: 2048
+kernel_bandwidth: 0.0

@@ -1,0 +1,15 @@
+name: w1
+potential:
+  hidden_dims: [256, 256, 256]
+  group_size: 2
+step_map:
+  hidden_dims: [256, 256, 256]
+  activation: silu
+  dropout: 0.0
+  residual: true
+  layer_norm: false
+critic_lr: 3.0e-4
+step_lr: 3.0e-4
+phase1_ratio: 0.5
+gradient_penalty_weight: 10.0
+compile: false

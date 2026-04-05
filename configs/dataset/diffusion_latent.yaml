@@ -1,0 +1,14 @@
+name: diffusion_latent
+source_dataset: cifar10
+root: data
+image_size: 32
+download: true
+encoder_name: resnet18
+pretrained_encoder: false
+cache_dir: artifacts/latents
+timesteps: [50, 250, 500, 750]
+latent_dim: 256
+num_train_timesteps: 1000
+batch_size: 128
+num_workers: 0
+save_intermediates: true

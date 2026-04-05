@@ -1,0 +1,11 @@
+defaults:
+  - model: ot_map
+  - solver: minimax
+  - dataset: synthetic_ot
+  - training: base
+  - _self_
+
+experiment:
+  id: ot_recovery
+  name: ot_benchmark
+  output_dir: outputs/ot_benchmark

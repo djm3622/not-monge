@@ -1,0 +1,12 @@
+name: diffusion_unet
+sample_size: 64
+in_channels: 3
+out_channels: 3
+base_channels: 64
+channel_multipliers: [1, 2, 4]
+num_res_blocks: 2
+attention_resolutions: [16]
+dropout: 0.0
+num_heads: 4
+backend: custom
+compile: false

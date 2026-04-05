@@ -1,0 +1,15 @@
+defaults:
+  - model: ot_map
+  - solver: minimax
+  - dataset: synthetic_ot
+  - training: base
+  - _self_
+
+experiment:
+  id: ot_recovery
+  name: ot_eval
+
+evaluation:
+  checkpoint_path: null
+  output_dir: outputs/eval
+  max_items: 2048

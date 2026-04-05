@@ -1,0 +1,8 @@
+name: diffusion_swin
+sample_size: 64
+in_channels: 3
+out_channels: 3
+backbone_name: swin_tiny_patch4_window7_224
+pretrained_backbone: false
+decoder_channels: 128
+compile: false

@@ -1,0 +1,5 @@
+name: potential_icnn
+input_dim: 8
+hidden_dims: [128, 128, 128]
+activation: softplus
+strong_convexity: 0.1

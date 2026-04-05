@@ -1,0 +1,14 @@
+name: tw2
+forward_potential:
+  hidden_dims: [128, 128, 128]
+  activation: softplus
+  strong_convexity: 0.1
+inverse_potential:
+  hidden_dims: [128, 128, 128]
+  activation: softplus
+  strong_convexity: 0.1
+lr: 3.0e-4
+transport_weight: 1.0
+cycle_weight: 10.0
+mmd_weight: 1.0
+compile: false

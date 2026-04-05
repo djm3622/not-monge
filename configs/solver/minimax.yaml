@@ -1,0 +1,11 @@
+name: minimax
+potential:
+  kind: mlp
+  hidden_dims: [256, 256, 256]
+  activation: silu
+  layer_norm: false
+critic_steps: 2
+weight_decay: 1.0e-4
+map_lr: 3.0e-4
+potential_lr: 3.0e-4
+compile: false

@@ -1,0 +1,7 @@
+name: qc
+potential:
+  hidden_dims: [256, 256, 256]
+  activation: silu
+  layer_norm: false
+potential_lr: 3.0e-4
+compile: false

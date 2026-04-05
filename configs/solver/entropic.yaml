@@ -1,0 +1,5 @@
+name: entropic
+lr: 3.0e-4
+reg: 0.1
+cost_weight: 0.1
+compile: false

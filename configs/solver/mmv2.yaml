@@ -1,0 +1,13 @@
+name: mmv2
+forward_potential:
+  hidden_dims: [128, 128, 128]
+  activation: softplus
+  strong_convexity: 0.1
+inverse_potential:
+  hidden_dims: [128, 128, 128]
+  activation: softplus
+  strong_convexity: 0.1
+critic_steps: 1
+forward_lr: 3.0e-4
+inverse_lr: 3.0e-4
+compile: false

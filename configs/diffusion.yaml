@@ -1,0 +1,9 @@
+defaults:
+  - model: diffusion_unet
+  - dataset: cifar10
+  - training: diffusion
+  - _self_
+
+experiment:
+  name: diffusion_baseline
+  output_dir: outputs/diffusion_baseline

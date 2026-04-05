@@ -1,0 +1,8 @@
+name: ot_map
+input_dim: 8
+hidden_dims: [256, 256, 256]
+output_dim: 8
+activation: silu
+dropout: 0.0
+residual: true
+layer_norm: true

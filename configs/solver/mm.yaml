@@ -1,0 +1,15 @@
+name: mm
+potential:
+  hidden_dims: [256, 256, 256]
+  activation: silu
+  layer_norm: false
+inner_map:
+  hidden_dims: [256, 256, 256]
+  activation: silu
+  dropout: 0.0
+  residual: true
+  layer_norm: false
+critic_steps: 1
+potential_lr: 3.0e-4
+inner_lr: 3.0e-4
+compile: false

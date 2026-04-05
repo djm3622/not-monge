@@ -1,0 +1,6 @@
+name: celeba
+root: data
+image_size: 64
+batch_size: 64
+num_workers: 0
+download: true

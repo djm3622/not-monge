@@ -1,0 +1,10 @@
+name: icnn
+potential:
+  hidden_dims: [128, 128, 128]
+  activation: softplus
+  strong_convexity: 0.1
+critic_steps: 1
+weight_decay: 1.0e-4
+map_lr: 2.0e-4
+potential_lr: 2.0e-4
+compile: false
