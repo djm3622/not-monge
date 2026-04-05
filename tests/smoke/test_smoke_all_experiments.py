@@ -13,8 +13,13 @@ pytestmark = pytest.mark.smoke
     ("experiment_id", "solver_name"),
     [
         ("ot_recovery", "minimax"),
+        ("ot_recovery", "otp"),
+        ("ot_recovery", "flow"),
         ("c_concavity", "icnn"),
+        ("c_concavity", "otp"),
         ("diffusion_latent", "minimax"),
+        ("diffusion_latent", "otp"),
+        ("diffusion_latent", "flow"),
     ],
 )
 def test_all_experiments_smoke(

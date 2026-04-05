@@ -274,6 +274,56 @@ def solver_config_factory() -> Callable[[str], dict[str, Any]]:
                 "reg": 1.0,
                 "cost_weight": 0.1,
             },
+            "otp": {
+                "name": "otp",
+                "critic_steps": 1,
+                "map_lr": 1.0e-3,
+                "potential_lr": 1.0e-3,
+                "potential": {
+                    "kind": "mlp",
+                    "hidden_dims": [8, 8],
+                    "activation": "silu",
+                    "layer_norm": False,
+                },
+                "smoothing": {
+                    "sigma_start": 0.05,
+                    "sigma_end": 0.0,
+                    "anneal_steps": 16,
+                },
+                "plan": {
+                    "enabled": True,
+                    "reg": 1.0,
+                    "supervision_weight": 0.5,
+                    "entropy_weight": 0.0,
+                },
+                "regularization": {
+                    "potential_gp_weight": 1.0,
+                    "potential_l2_weight": 1.0e-3,
+                },
+            },
+            "flow": {
+                "name": "flow",
+                "velocity": {
+                    "hidden_dims": [8, 8],
+                    "activation": "silu",
+                    "layer_norm": False,
+                },
+                "lr": 1.0e-3,
+                "integration": {
+                    "backend": "rk4",
+                    "method": "rk4",
+                    "steps": 4,
+                    "atol": 1.0e-5,
+                    "rtol": 1.0e-5,
+                    "use_adjoint": False,
+                },
+                "plan": {"reg": 1.0},
+                "loss": {
+                    "endpoint_weight": 1.0,
+                    "energy_weight": 0.1,
+                    "mmd_weight": 0.05,
+                },
+            },
             "w1": {
                 "name": "w1",
                 "potential": {"hidden_dims": [8, 8], "group_size": 2},

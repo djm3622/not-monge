@@ -1,0 +1,20 @@
+name: flow
+velocity:
+  hidden_dims: [256, 256, 256]
+  activation: silu
+  layer_norm: false
+lr: 3.0e-4
+integration:
+  backend: auto
+  method: rk4
+  steps: 8
+  atol: 1.0e-5
+  rtol: 1.0e-5
+  use_adjoint: false
+plan:
+  reg: 0.1
+loss:
+  endpoint_weight: 1.0
+  energy_weight: 0.1
+  mmd_weight: 0.05
+compile: false

@@ -10,7 +10,7 @@ from src.training.diffusion_task import DiffusionTrainingTask
 
 pytestmark = pytest.mark.integration
 
-LEARNED_SOLVERS = ["minimax", "icnn", "tw2", "mmv2", "mm", "mm_b", "qc", "entropic", "w1"]
+LEARNED_SOLVERS = ["minimax", "icnn", "tw2", "mmv2", "mm", "mm_b", "qc", "entropic", "otp", "flow", "w1"]
 
 
 def _parameter_snapshot(module: torch.nn.Module) -> list[torch.Tensor]:

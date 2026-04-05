@@ -21,6 +21,8 @@ EXPECTED_SOLVERS = [
     "sinkhorn",
     "gaussian",
     "entropic",
+    "otp",
+    "flow",
     "w1",
 ]
 
