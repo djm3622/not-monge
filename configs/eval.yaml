@@ -13,3 +13,8 @@ evaluation:
   checkpoint_path: null
   output_dir: outputs/eval
   max_items: 2048
+
+visualization:
+  enabled: false
+  dirpath: visualizations
+  max_items: 512

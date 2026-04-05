@@ -16,6 +16,7 @@ from src.datasets.synthetic_ot import build_synthetic_ot_benchmark
 from src.evaluation.concavity_metrics import convexity_violation, envelope_gap, hessian_spectrum
 from src.evaluation.generative_metrics import frechet_inception_distance, precision_recall_from_features
 from src.evaluation.ot_metrics import empirical_w2_distance, gradient_error, map_l2_error, maximum_mean_discrepancy
+from src.evaluation.visualization import save_ot_visualizations
 from src.solvers.base import BaseOTSolver
 from src.solvers.registry import build_solver
 from src.training.trainer import Trainer, move_to_device
@@ -96,6 +97,7 @@ def evaluate_ot_solver(
     dataset_bundle: Any,
     config: Mapping[str, Any],
     device: torch.device,
+    output_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Evaluate a solver according to the configured experiment."""
     _, _, test_loader = dataset_bundle.make_dataloaders()
@@ -131,6 +133,19 @@ def evaluate_ot_solver(
         metrics["fid"] = frechet_inception_distance(real_features, fake_features)
         metrics.update(precision_recall_from_features(real_features, fake_features))
         metrics["metric_space"] = "latent"
+
+    visualization_cfg = dict(config.get("visualization", {}))
+    if (
+        output_dir is not None
+        and bool(visualization_cfg.get("enabled", False))
+        and "ground_truth_map" in aggregated
+    ):
+        image_path = save_ot_visualizations(
+            aggregated,
+            Path(output_dir) / str(visualization_cfg.get("dirpath", "visualizations")),
+            max_items=int(visualization_cfg.get("max_items", 512)),
+        )
+        metrics["visualization_path"] = str(image_path)
 
     return metrics
 
@@ -170,7 +185,13 @@ def train_baseline_run(config: Mapping[str, Any], output_root: str | Path) -> di
 
     if hasattr(dataset_bundle, "ground_truth_potential"):
         dataset_bundle.ground_truth_potential.to(device)
-    metrics = evaluate_ot_solver(solver, dataset_bundle, config=config, device=device)
+    metrics = evaluate_ot_solver(
+        solver,
+        dataset_bundle,
+        config=config,
+        device=device,
+        output_dir=output_dir,
+    )
     result = build_result_record(config, solver, metrics)
     with (output_dir / "results.json").open("w", encoding="utf-8") as handle:
         json.dump(result, handle, indent=2)
@@ -188,13 +209,19 @@ def eval_baseline_run(
     load_solver_checkpoint(solver, checkpoint_path)
     solver.eval()
     device = torch.device("cpu")
+    output_dir = Path(output_root)
+    output_dir.mkdir(parents=True, exist_ok=True)
     solver.to(device)
     if hasattr(dataset_bundle, "ground_truth_potential"):
         dataset_bundle.ground_truth_potential.to(device)
-    metrics = evaluate_ot_solver(solver, dataset_bundle, config=config, device=device)
+    metrics = evaluate_ot_solver(
+        solver,
+        dataset_bundle,
+        config=config,
+        device=device,
+        output_dir=output_dir,
+    )
     result = build_result_record(config, solver, metrics)
-    output_dir = Path(output_root)
-    output_dir.mkdir(parents=True, exist_ok=True)
     with (output_dir / "results.json").open("w", encoding="utf-8") as handle:
         json.dump(result, handle, indent=2)
     return result

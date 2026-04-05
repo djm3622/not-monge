@@ -1,5 +1,5 @@
 seed: 1234
-max_epochs: 50
+max_epochs: 1000
 max_steps: 1000
 log_every_n_steps: 20
 validate_every_n_epochs: 1

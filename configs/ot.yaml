@@ -9,3 +9,8 @@ experiment:
   id: ot_recovery
   name: ot_benchmark
   output_dir: outputs/ot_benchmark
+
+visualization:
+  enabled: false
+  dirpath: visualizations
+  max_items: 512
