@@ -1,4 +1,4 @@
-"""Run and aggregate paper-style case study 1 comparisons."""
+"""Run and report the case study 1 broad comparison."""
 
 from __future__ import annotations
 
@@ -9,11 +9,54 @@ import subprocess
 import sys
 from pathlib import Path
 from statistics import mean, pstdev
+from typing import Any
+
+import torch
+from omegaconf import OmegaConf
 
 ROOT = Path(__file__).resolve().parents[1]
-from PIL import Image, ImageDraw, ImageFont
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-DEFAULT_SEEDS = [1234, 2024, 3407, 4444, 5555, 6666, 7777, 8888, 9999, 11111]
+from src.benchmarking import collect_ot_predictions, eval_baseline_run, load_solver_checkpoint, resolve_ot_dataset
+from src.evaluation.visualization import save_ot_visualizations
+from src.solvers.registry import build_solver
+
+DEFAULT_SEEDS = [
+    686499,
+    928801,
+    48156,
+    431753,
+    526655,
+    480953,
+    178898,
+    700645,
+    62001,
+    192385,
+    911170,
+    307368,
+    546159,
+    381730,
+    917274,
+    910268,
+    301123,
+    218738,
+    982909,
+    870264,
+    948176,
+    164608,
+    892045,
+    767301,
+    576270,
+    525000,
+    7029,
+    644131,
+    480217,
+    389379,
+]
+DEFAULT_SOLVERS = ["gaussian", "mm", "mmv2", "tw2", "mm_b", "qc"]
+DEFAULT_FIGURE_SOLVERS = ["mm", "mmv2"]
+DEFAULT_CACHE_VERSION = "paper_ref_d64_b256_s25k"
 
 SOLVER_SPECS: dict[str, dict[str, object]] = {
     "gaussian": {
@@ -23,48 +66,66 @@ SOLVER_SPECS: dict[str, dict[str, object]] = {
         "extra_overrides": [],
     },
     "mm": {
-        "max_steps": 512,
+        "max_steps": 2048,
         "batch_size": 1024,
         "steps_per_epoch": 128,
         "extra_overrides": [
-            "solver.forward_lr=3e-4",
-            "solver.inverse_lr=3e-4",
-            "solver.inner_steps=5",
+            "solver.forward_lr=1e-3",
+            "solver.inverse_lr=1e-3",
+            "solver.inner_steps=15",
         ],
     },
     "mmv2": {
-        "max_steps": 512,
+        "max_steps": 2048,
         "batch_size": 1024,
         "steps_per_epoch": 128,
-        "extra_overrides": [],
+        "extra_overrides": [
+            "solver.forward_lr=1e-3",
+            "solver.inverse_lr=1e-3",
+            "solver.inner_steps=15",
+        ],
     },
     "tw2": {
-        "max_steps": 512,
+        "max_steps": 2048,
         "batch_size": 1024,
         "steps_per_epoch": 128,
         "extra_overrides": [],
     },
     "mm_b": {
-        "max_steps": 512,
+        "max_steps": 2048,
         "batch_size": 1024,
         "steps_per_epoch": 128,
         "extra_overrides": [],
     },
     "qc": {
-        "max_steps": 256,
+        "max_steps": 2048,
         "batch_size": 64,
         "steps_per_epoch": 128,
         "extra_overrides": [],
     },
 }
-
-METRICS = ["map_l2", "l2_uvp", "transport_cos", "pushforward_w2", "mmd", "gradient_error"]
-CHART_COLORS = ["#215E8A", "#2F8A5B", "#C66531", "#8B7B3A", "#7A4E8A", "#8A2F5D"]
-BACKGROUND = (248, 246, 240)
-PANEL_BG = (255, 255, 255)
-BORDER = (210, 205, 196)
-TEXT = (28, 31, 36)
-GRID = (232, 228, 220)
+METRIC_SPECS = {
+    "map_l2": {},
+    "l2_uvp": {},
+    "transport_cos": {},
+    "saddle_residual": {},
+    "mmd": {},
+}
+LATEX_SOLVER_NAMES = {
+    "gaussian": "Gaussian",
+    "mm": "tMM",
+    "mmv2": "tICNN",
+    "tw2": "tW2",
+    "mm_b": "tMM-B",
+    "qc": "tQC",
+}
+TABLE_COLUMNS = [
+    ("map_l2", "Map L2 $\\downarrow$"),
+    ("l2_uvp", "L2 UVP $\\downarrow$"),
+    ("transport_cos", "Cosine Similarity $\\uparrow$"),
+    ("saddle_residual", "Saddle Residual $\\downarrow$"),
+    ("mmd", "MMD $\\downarrow$"),
+]
 
 
 def _parse_csv_ints(value: str) -> list[int]:
@@ -75,7 +136,28 @@ def _parse_csv_strings(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _resolve_output_path(value: str) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else ROOT / path
+
+
+def _resolve_device(value: str) -> torch.device:
+    if value == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    device = torch.device(value)
+    if device.type == "mps" and not (getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()):
+        raise RuntimeError("Requested device 'mps' but torch.backends.mps.is_available() is False.")
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("Requested device 'cuda' but torch.cuda.is_available() is False.")
+    return device
+
+
 def _run_one(
+    *,
     python_exe: str,
     solver: str,
     seed: int,
@@ -83,18 +165,38 @@ def _run_one(
     cache_version: str,
     eval_items: int,
     spec: dict[str, object],
+    device: str,
     rerun: bool,
-) -> dict:
+) -> dict[str, Any]:
     result_path = output_dir / "results.json"
     if result_path.exists() and not rerun:
-        return json.loads(result_path.read_text())
+        existing = json.loads(result_path.read_text(encoding="utf-8"))
+        metric_keys = set(existing.get("metrics", {}))
+        if set(METRIC_SPECS).issubset(metric_keys):
+            return existing
+        checkpoint_path = output_dir / "checkpoints" / "best.pt"
+        if checkpoint_path.exists():
+            config = _build_run_config(
+                solver_name=solver,
+                seed=seed,
+                spec=spec,
+                cache_version=cache_version,
+                device="cpu",
+                eval_items=eval_items,
+            )
+            return eval_baseline_run(
+                config=config,
+                checkpoint_path=checkpoint_path,
+                output_root=output_dir,
+            )
+        return existing
 
     command = [
         python_exe,
         "scripts/train_baseline.py",
         f"solver={solver}",
         "dataset=paper_mix3to10",
-        "training.device=cpu",
+        f"training.device={device}",
         "training.gradient_clip_norm=null",
         "visualization.enabled=true",
         f"training.seed={seed}",
@@ -110,15 +212,15 @@ def _run_one(
     ]
     command.extend(str(item) for item in spec.get("extra_overrides", []))
     subprocess.run(command, cwd=ROOT, check=True)
-    return json.loads(result_path.read_text())
+    return json.loads(result_path.read_text(encoding="utf-8"))
 
 
-def _aggregate(rows: list[dict]) -> dict[str, dict[str, tuple[float, float]]]:
+def _aggregate(rows: list[dict[str, Any]]) -> dict[str, dict[str, tuple[float, float]]]:
     grouped: dict[str, dict[str, list[float]]] = {}
     for row in rows:
-        solver = row["solver_id"]
+        solver = str(row["solver_id"])
         grouped.setdefault(solver, {})
-        for metric in METRICS:
+        for metric in METRIC_SPECS:
             value = row["metrics"].get(metric)
             if value is None:
                 continue
@@ -132,12 +234,23 @@ def _aggregate(rows: list[dict]) -> dict[str, dict[str, tuple[float, float]]]:
     return summary
 
 
-def _write_markdown(path: Path, summary: dict[str, dict[str, tuple[float, float]]], specs: dict[str, dict[str, object]]) -> None:
+def _write_markdown(
+    path: Path,
+    *,
+    summary: dict[str, dict[str, tuple[float, float]]],
+    specs: dict[str, dict[str, object]],
+    representative_rows: dict[str, dict[str, Any]],
+    cache_version: str,
+) -> None:
+    metric_columns = [metric for metric, _ in TABLE_COLUMNS]
     lines = [
-        "# Paper Case Study 1 Full Comparison",
+        "# Paper Case Study 1 Broad Comparison",
         "",
-        "| Solver | Batch | Steps | map_l2 | l2_uvp | transport_cos | pushforward_w2 | mmd | gradient_error |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        f"Dataset cache: `{cache_version}`.",
+        "Checkpoint selection monitor: `val/map_l2`.",
+        "",
+        "| Solver | " + " | ".join(metric_columns) + " |",
+        "| --- | " + " | ".join("---" for _ in metric_columns) + " |",
     ]
 
     for solver in specs:
@@ -145,163 +258,245 @@ def _write_markdown(path: Path, summary: dict[str, dict[str, tuple[float, float]
 
         def fmt(metric: str) -> str:
             value, spread = metrics.get(metric, (math.nan, math.nan))
+            if not math.isfinite(value) or not math.isfinite(spread):
+                return "n/a"
             return f"{value:.4f} ± {spread:.4f}"
 
-        lines.append(
-            f"| {solver} | {int(specs[solver]['batch_size'])} | {int(specs[solver]['max_steps'])} | "
-            f"{fmt('map_l2')} | {fmt('l2_uvp')} | {fmt('transport_cos')} | {fmt('pushforward_w2')} | "
-            f"{fmt('mmd')} | {fmt('gradient_error')} |"
+        formatted_metrics = " | ".join(fmt(metric) for metric in metric_columns)
+        lines.append(f"| {LATEX_SOLVER_NAMES.get(solver, solver)} | {formatted_metrics} |")
+
+    if representative_rows:
+        lines.extend(
+            [
+                "",
+                "Representative geometry figures use the seed closest to each solver's mean final `map_l2`.",
+                "",
+            ]
         )
+        for solver, row in representative_rows.items():
+            transport_path = Path(str(row["transport_figure_path"]))
+            display_name = LATEX_SOLVER_NAMES.get(solver, solver)
+            lines.append(f"- `{display_name}` seed `{row['seed']}` transport: `{transport_path.relative_to(ROOT).as_posix()}`")
+            saddle_path = row.get("saddle_figure_path")
+            if saddle_path:
+                lines.append(
+                    f"- `{display_name}` seed `{row['seed']}` saddle: `{Path(str(saddle_path)).relative_to(ROOT).as_posix()}`"
+                )
 
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _write_summary_plot(path: Path, summary: dict[str, dict[str, tuple[float, float]]], solvers: list[str]) -> None:
-    plotted = [
-        ("l2_uvp", "L2-UVP"),
-        ("transport_cos", "Transport Cos"),
-        ("map_l2", "Map L2"),
+def _format_sig(value: float) -> str:
+    if value == 0.0:
+        return "0.000"
+    exponent = math.floor(math.log10(abs(value)))
+    digits_after_decimal = max(0, 2 - exponent)
+    return f"{value:.{digits_after_decimal}f}"
+
+
+def _format_mean_pm_std(values: tuple[float, float] | None) -> str:
+    if values is None:
+        return "n/a"
+    mean_value, std_value = values
+    if not math.isfinite(mean_value) or not math.isfinite(std_value):
+        return "n/a"
+    return f"{_format_sig(mean_value)} $\\pm$ {_format_sig(std_value)}"
+
+
+def _metric_ranks(
+    summary: dict[str, dict[str, tuple[float, float]]],
+    metric: str,
+) -> tuple[str | None, str | None]:
+    values = [
+        (solver, summary[solver][metric][0])
+        for solver in summary
+        if metric in summary[solver] and math.isfinite(summary[solver][metric][0])
     ]
-    canvas = Image.new("RGB", (1620, 560), BACKGROUND)
-    draw = ImageDraw.Draw(canvas)
-    font = ImageFont.load_default()
-
-    for index, (metric, title) in enumerate(plotted):
-        box = (30 + index * 530, 36, 520 + index * 530, 520)
-        _draw_panel(draw, box, title, font)
-        plot_box = _plot_box(box)
-        means = [summary[solver][metric][0] for solver in solvers]
-        stds = [summary[solver][metric][1] for solver in solvers]
-        _draw_bars(draw, plot_box, solvers, means, stds, font)
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    canvas.save(path)
+    if not values:
+        return None, None
+    reverse = metric == "transport_cos"
+    ordered = sorted(values, key=lambda item: item[1], reverse=reverse)
+    best = ordered[0][0]
+    second = ordered[1][0] if len(ordered) > 1 else None
+    return best, second
 
 
-def _write_visual_panel(path: Path, rows: list[dict], solvers: list[str]) -> None:
-    selected: list[tuple[str, Path]] = []
-    for solver in solvers:
-        solver_rows = [row for row in rows if row["solver_id"] == solver]
-        solver_rows.sort(key=lambda row: float(row["metrics"]["map_l2"]))
-        if not solver_rows:
-            continue
-        selected.append((solver, Path(str(solver_rows[0]["metrics"]["visualization_path"]))))
-
-    columns = len(selected)
-    if columns == 0:
-        return
-    tile_width = 360
-    tile_height = 360
-    margin = 24
-    title_height = 22
-    canvas = Image.new(
-        "RGB",
-        (margin + columns * (tile_width + margin), margin * 2 + title_height + tile_height),
-        BACKGROUND,
-    )
-    draw = ImageDraw.Draw(canvas)
-    font = ImageFont.load_default()
-    for index, (solver, image_path) in enumerate(selected):
-        left = margin + index * (tile_width + margin)
-        draw.text((left, margin), solver, fill=TEXT, font=font)
-        image = Image.open(image_path).convert("RGB")
-        image.thumbnail((tile_width, tile_height))
-        tile = Image.new("RGB", (tile_width, tile_height), PANEL_BG)
-        offset = ((tile_width - image.width) // 2, (tile_height - image.height) // 2)
-        tile.paste(image, offset)
-        canvas.paste(tile, (left, margin + title_height))
-        draw.rectangle((left, margin + title_height, left + tile_width, margin + title_height + tile_height), outline=BORDER, width=1)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    canvas.save(path)
-
-
-def _draw_panel(
-    draw: ImageDraw.ImageDraw,
-    box: tuple[int, int, int, int],
-    title: str,
-    font: ImageFont.ImageFont,
-) -> None:
-    draw.rounded_rectangle(box, radius=16, fill=PANEL_BG, outline=BORDER, width=2)
-    draw.text((box[0] + 16, box[1] + 12), title, fill=TEXT, font=font)
-    _draw_grid(draw, _plot_box(box))
-
-
-def _plot_box(box: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
-    left, top, right, bottom = box
-    return left + 18, top + 44, right - 18, bottom - 28
-
-
-def _draw_grid(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int]) -> None:
-    left, top, right, bottom = box
-    width = right - left
-    height = bottom - top
-    for fraction in (0.25, 0.5, 0.75):
-        y = top + int(height * fraction)
-        draw.line((left, y, right, y), fill=GRID, width=1)
-    draw.rectangle(box, outline=BORDER, width=1)
-
-
-def _draw_bars(
-    draw: ImageDraw.ImageDraw,
-    box: tuple[int, int, int, int],
+def _write_latex_table(
+    path: Path,
+    *,
+    summary: dict[str, dict[str, tuple[float, float]]],
     solvers: list[str],
-    means: list[float],
-    stds: list[float],
-    font: ImageFont.ImageFont,
 ) -> None:
-    left, top, right, bottom = box
-    width = right - left
-    height = bottom - top
-    min_value = min(min((mean - std for mean, std in zip(means, stds)), default=0.0), 0.0)
-    max_value = max(max((mean + std for mean, std in zip(means, stds)), default=1.0), 1.0e-6)
-    scale = max(max_value - min_value, 1.0e-6)
-    zero_y = bottom - int(((0.0 - min_value) / scale) * (height - 36))
-    zero_y = max(top, min(bottom, zero_y))
-    draw.line((left, zero_y, right, zero_y), fill=TEXT, width=1)
-    bar_width = max(12, int(width / max(1, len(solvers) * 2)))
-    gap = bar_width
-    x = left + gap // 2
-    for index, (solver, mean_value, std_value) in enumerate(zip(solvers, means, stds)):
-        y_end = bottom - int(((mean_value - min_value) / scale) * (height - 36))
-        y0 = min(zero_y, y_end)
-        y1 = max(zero_y, y_end)
-        color = _hex_to_rgb(CHART_COLORS[index % len(CHART_COLORS)])
-        draw.rectangle((x, y0, x + bar_width, y1), fill=color)
-        error_top = bottom - int((((mean_value + std_value) - min_value) / scale) * (height - 36))
-        error_bottom = bottom - int((((mean_value - std_value) - min_value) / scale) * (height - 36))
-        center = x + bar_width // 2
-        draw.line((center, error_top, center, error_bottom), fill=TEXT, width=1)
-        draw.line((center - 4, error_top, center + 4, error_top), fill=TEXT, width=1)
-        draw.line((center - 4, error_bottom, center + 4, error_bottom), fill=TEXT, width=1)
-        draw.text((x - 4, bottom + 6), solver, fill=TEXT, font=font)
-        x += bar_width + gap
+    rankings = {metric: _metric_ranks(summary, metric) for metric, _ in TABLE_COLUMNS}
+    lines = [
+        "\\begin{table*}[t]",
+        "\\centering",
+        "\\small",
+        "\\setlength{\\tabcolsep}{4pt}",
+        "\\begin{tabular}{l" + "c" * len(TABLE_COLUMNS) + "}",
+        "\\toprule",
+        "Solver & " + " & ".join(label for _, label in TABLE_COLUMNS) + " \\\\",
+        "\\midrule",
+    ]
+    for solver in solvers:
+        display_name = LATEX_SOLVER_NAMES.get(solver, solver)
+        cells = [display_name]
+        solver_metrics = summary.get(solver, {})
+        for metric, _ in TABLE_COLUMNS:
+            text = _format_mean_pm_std(solver_metrics.get(metric))
+            best, second = rankings[metric]
+            if solver == best and text != "n/a":
+                text = f"\\textbf{{{text}}}"
+            elif solver == second and text != "n/a":
+                text = f"\\emph{{{text}}}"
+            cells.append(text)
+        lines.append(" & ".join(cells) + " \\\\")
+    lines.extend(
+        [
+            "\\bottomrule",
+            "\\end{tabular}",
+            "\\label{tab:case1_broad_30seed_results}",
+            "\\end{table*}",
+            "",
+        ]
+    )
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def _hex_to_rgb(value: str) -> tuple[int, int, int]:
-    value = value.lstrip("#")
-    return tuple(int(value[i : i + 2], 16) for i in (0, 2, 4))
+def _select_representative_row(rows: list[dict[str, Any]], solver: str, metric: str = "map_l2") -> dict[str, Any] | None:
+    solver_rows = [row for row in rows if row["solver_id"] == solver and row["metrics"].get(metric) is not None]
+    if not solver_rows:
+        return None
+    target = mean(float(row["metrics"][metric]) for row in solver_rows)
+    return min(solver_rows, key=lambda row: abs(float(row["metrics"][metric]) - target))
+
+
+def _apply_override(config: dict[str, Any], override: str) -> None:
+    key, raw_value = override.split("=", 1)
+    value = OmegaConf.create({"value": raw_value})["value"]
+    node: dict[str, Any] = config
+    parts = key.split(".")
+    for part in parts[:-1]:
+        child = node.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            node[part] = child
+        node = child
+    node[parts[-1]] = value
+
+
+def _build_run_config(
+    *,
+    solver_name: str,
+    seed: int,
+    spec: dict[str, Any],
+    cache_version: str,
+    device: str,
+    eval_items: int,
+) -> dict[str, Any]:
+    model = OmegaConf.to_container(OmegaConf.load(ROOT / "configs/model/ot_map.yaml"), resolve=True)
+    solver = OmegaConf.to_container(OmegaConf.load(ROOT / f"configs/solver/{solver_name}.yaml"), resolve=True)
+    dataset = OmegaConf.to_container(OmegaConf.load(ROOT / "configs/dataset/paper_mix3to10.yaml"), resolve=True)
+    training = OmegaConf.to_container(OmegaConf.load(ROOT / "configs/training/base.yaml"), resolve=True)
+
+    assert isinstance(model, dict)
+    assert isinstance(solver, dict)
+    assert isinstance(dataset, dict)
+    assert isinstance(training, dict)
+
+    config: dict[str, Any] = {
+        "model": model,
+        "solver": solver,
+        "dataset": dataset,
+        "training": training,
+        "experiment": {
+            "id": "ot_recovery",
+            "name": "paper_case1_full_compare",
+            "output_dir": "outputs/paper_case1_full_compare",
+        },
+        "visualization": {"enabled": False, "dirpath": "visualizations", "max_items": 512},
+        "evaluation": {"max_items": eval_items},
+    }
+    config["model"]["input_dim"] = 64
+    config["model"]["output_dim"] = 64
+    config["dataset"]["batch_size"] = int(spec["batch_size"])
+    config["dataset"]["steps_per_epoch"] = int(spec["steps_per_epoch"])
+    config["dataset"]["cache_version"] = cache_version
+    config["training"]["seed"] = seed
+    config["training"]["device"] = device
+    config["training"]["max_steps"] = int(spec["max_steps"])
+    config["training"]["gradient_clip_norm"] = None
+    for override in spec.get("extra_overrides", []):
+        _apply_override(config, str(override))
+    return config
+
+
+def _render_representative_geometry(
+    *,
+    output_dir: Path,
+    solver_name: str,
+    seed: int,
+    spec: dict[str, Any],
+    cache_version: str,
+    device: torch.device,
+    eval_items: int,
+    max_items: int,
+    checkpoint_path: Path,
+) -> dict[str, Path | None]:
+    config = _build_run_config(
+        solver_name=solver_name,
+        seed=seed,
+        spec=spec,
+        cache_version=cache_version,
+        device=device.type,
+        eval_items=eval_items,
+    )
+    dataset_bundle = resolve_ot_dataset(config)
+    solver = build_solver(config["model"], config["solver"], config["training"]).to(device)
+    load_solver_checkpoint(solver, checkpoint_path)
+    solver.eval()
+    _, _, test_loader = dataset_bundle.make_dataloaders()
+    aggregated = collect_ot_predictions(solver, test_loader, device=device, max_items=eval_items)
+    transport_path = save_ot_visualizations(aggregated, output_dir, max_items=max_items, solver=solver)
+    saddle_path = output_dir / "saddle_geometry.png"
+    return {
+        "transport": transport_path,
+        "saddle": saddle_path if saddle_path.exists() else None,
+    }
+
+
+def _prune_legacy_report_artifacts(figures_dir: Path) -> None:
+    if not figures_dir.exists():
+        return
+    for pattern in ("final_*.png", "final_*.pdf", "trajectory_*.png", "trajectory_*.pdf"):
+        for path in figures_dir.glob(pattern):
+            path.unlink(missing_ok=True)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--seeds", default=",".join(str(seed) for seed in DEFAULT_SEEDS))
-    parser.add_argument("--solvers", default="gaussian,mm,mmv2,tw2,mm_b,qc")
-    parser.add_argument("--cache-version", required=True)
-    parser.add_argument("--output-root", required=True)
+    parser.add_argument("--solvers", default=",".join(DEFAULT_SOLVERS))
+    parser.add_argument("--figure-solvers", default=",".join(DEFAULT_FIGURE_SOLVERS))
+    parser.add_argument("--cache-version", default=DEFAULT_CACHE_VERSION)
+    parser.add_argument("--output-root", default="outputs/paper_case1_full_compare_broad_30seeds_v3")
     parser.add_argument("--eval-items", type=int, default=4096)
+    parser.add_argument("--visualization-items", type=int, default=512)
+    parser.add_argument("--device", default="cpu")
     parser.add_argument("--rerun", action="store_true")
     args = parser.parse_args()
 
     seeds = _parse_csv_ints(args.seeds)
     solvers = _parse_csv_strings(args.solvers)
+    figure_solvers = _parse_csv_strings(args.figure_solvers)
     for solver in solvers:
         if solver not in SOLVER_SPECS:
             raise ValueError(f"Unknown solver '{solver}'")
 
-    output_root = ROOT / args.output_root
+    output_root = _resolve_output_path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
 
-    rows = []
+    rows: list[dict[str, Any]] = []
     for solver in solvers:
         solver_output = output_root / solver
         solver_output.mkdir(parents=True, exist_ok=True)
@@ -314,20 +509,70 @@ def main() -> None:
                     solver=solver,
                     seed=seed,
                     output_dir=run_dir,
-                    cache_version=args.cache_version,
-                    eval_items=args.eval_items,
+                    cache_version=str(args.cache_version),
+                    eval_items=int(args.eval_items),
                     spec=spec,
+                    device=str(args.device),
                     rerun=bool(args.rerun),
                 )
             )
 
     summary = _aggregate(rows)
-    (output_root / "run_specs.json").write_text(json.dumps({solver: SOLVER_SPECS[solver] for solver in solvers}, indent=2), encoding="utf-8")
+    figures_dir = output_root / "figures"
+    _prune_legacy_report_artifacts(figures_dir)
+
+    representative_rows: dict[str, dict[str, Any]] = {}
+    report_device = _resolve_device(str(args.device))
+    for solver in figure_solvers:
+        if solver not in solvers:
+            continue
+        row = _select_representative_row(rows, solver)
+        if row is None:
+            continue
+        checkpoint_path = output_root / solver / f"{solver}_seed{row['seed']}" / "checkpoints" / "best.pt"
+        if not checkpoint_path.exists():
+            continue
+        solver_figure_dir = figures_dir / solver
+        rendered_paths = _render_representative_geometry(
+            output_dir=solver_figure_dir,
+            solver_name=solver,
+            seed=int(row["seed"]),
+            spec=SOLVER_SPECS[solver],
+            cache_version=str(args.cache_version),
+            device=report_device,
+            eval_items=int(args.eval_items),
+            max_items=int(args.visualization_items),
+            checkpoint_path=checkpoint_path,
+        )
+        representative_rows[solver] = {
+            "seed": int(row["seed"]),
+            "map_l2": float(row["metrics"]["map_l2"]),
+            "transport_figure_path": str(rendered_paths["transport"]),
+            "saddle_figure_path": str(rendered_paths["saddle"]) if rendered_paths["saddle"] is not None else None,
+        }
+
+    run_specs = {
+        "_metadata": {
+            "cache_version": str(args.cache_version),
+            "checkpoint_monitor": "val/map_l2",
+            "evaluation_max_items": int(args.eval_items),
+            "visualization_max_items": int(args.visualization_items),
+            "figure_solvers": figure_solvers,
+        },
+        **{solver: SOLVER_SPECS[solver] for solver in solvers},
+    }
+    (output_root / "run_specs.json").write_text(json.dumps(run_specs, indent=2), encoding="utf-8")
     (output_root / "seed_results.json").write_text(json.dumps(rows, indent=2), encoding="utf-8")
     (output_root / "seed_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    _write_markdown(output_root / "seed_summary.md", summary, {solver: SOLVER_SPECS[solver] for solver in solvers})
-    _write_summary_plot(output_root / "seed_summary.png", summary, solvers)
-    _write_visual_panel(output_root / "visual_panel.png", rows, solvers)
+    (output_root / "representative_runs.json").write_text(json.dumps(representative_rows, indent=2), encoding="utf-8")
+    _write_latex_table(output_root / "case1_results_table.tex", summary=summary, solvers=solvers)
+    _write_markdown(
+        output_root / "seed_summary.md",
+        summary=summary,
+        specs={solver: SOLVER_SPECS[solver] for solver in solvers},
+        representative_rows=representative_rows,
+        cache_version=str(args.cache_version),
+    )
 
 
 if __name__ == "__main__":

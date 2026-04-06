@@ -25,6 +25,7 @@ def test_save_ot_visualizations_writes_png(tmp_path: Path) -> None:
 
     image_path = save_ot_visualizations(aggregated, tmp_path, max_items=3)
 
-    assert image_path == tmp_path / "ot_recovery_overview.png"
+    assert image_path == tmp_path / "transport_geometry.png"
     assert image_path.exists()
     assert image_path.stat().st_size > 0
+    assert (tmp_path / "transport_geometry.pdf").exists()

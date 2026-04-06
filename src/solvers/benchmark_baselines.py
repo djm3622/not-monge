@@ -11,6 +11,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from src.evaluation.ot_metrics import l2_unexplained_variance_percentage, transport_cosine_similarity
 from src.models.potential import build_potential
 from src.solvers.base import BaseOTSolver
 from src.solvers.minimax_ot import frozen_parameters
@@ -175,6 +176,39 @@ class TwoPotentialSolver(PotentialMapSolver):
         self.inverse_potential.load_state_dict(state_dict["inverse_potential"], strict=strict)
         for optimizer, optimizer_state in zip(self.optimizers, state_dict.get("optimizers", [])):
             optimizer.load_state_dict(optimizer_state)
+
+    def validation_step(self, batch: Mapping[str, torch.Tensor]) -> Mapping[str, float]:
+        metrics = dict(super().validation_step(batch))
+        inverse = self.compute_inverse_map(batch["target"]).detach()
+        cycle_source = self.compute_inverse_map(self.compute_map(batch["source"])).detach()
+        cycle_target = self.compute_map(inverse).detach()
+        inverse_map_l2 = float((inverse - batch["source"]).pow(2).mean().sqrt().detach())
+        cycle_source_l2 = float((cycle_source - batch["source"]).pow(2).mean().sqrt().detach())
+        cycle_target_l2 = float((cycle_target - batch["target"]).pow(2).mean().sqrt().detach())
+        metrics.update(
+            {
+                "val/inverse_map_l2": inverse_map_l2,
+                "val/l2_uvp_inv": l2_unexplained_variance_percentage(
+                    inverse,
+                    batch["source"].detach(),
+                    batch["source"].detach(),
+                ),
+                "val/transport_cos_inv": transport_cosine_similarity(
+                    inverse,
+                    batch["source"].detach(),
+                    batch["target"].detach(),
+                ),
+                "val/l2_uvp_total": float(metrics["val/l2_uvp_fwd"]) + l2_unexplained_variance_percentage(
+                    inverse,
+                    batch["source"].detach(),
+                    batch["source"].detach(),
+                ),
+                "val/cycle_source_l2": cycle_source_l2,
+                "val/cycle_target_l2": cycle_target_l2,
+                "val/cycle_total_l2": cycle_source_l2 + cycle_target_l2,
+            }
+        )
+        return metrics
 
 
 class MMOTSolver(TwoPotentialSolver):

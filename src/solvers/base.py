@@ -8,6 +8,10 @@ from typing import Any, Iterable, Mapping, Protocol
 import torch
 from torch import nn
 
+from src.evaluation.ot_metrics import (
+    l2_unexplained_variance_percentage,
+    transport_cosine_similarity,
+)
 from src.training.losses import quadratic_cost
 from src.training.schedulers import build_one_cycle_schedulers
 from src.utils.device import maybe_compile_module
@@ -95,6 +99,16 @@ class BaseOTSolver(nn.Module, ABC):
         metrics = {
             "val/map_l2": float((transported - batch["ground_truth_map"]).pow(2).mean().sqrt().detach()),
             "val/pushforward_w2": float(quadratic_cost(transported, batch["target"]).mean().sqrt().detach()),
+            "val/l2_uvp_fwd": l2_unexplained_variance_percentage(
+                transported.detach(),
+                batch["ground_truth_map"].detach(),
+                batch["target"].detach(),
+            ),
+            "val/transport_cos_fwd": transport_cosine_similarity(
+                transported.detach(),
+                batch["ground_truth_map"].detach(),
+                batch["source"].detach(),
+            ),
         }
         potential = self.compute_potential(batch["target"])
         if potential is not None:

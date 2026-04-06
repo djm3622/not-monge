@@ -20,8 +20,8 @@ def l2_unexplained_variance_percentage(
     reference_samples: torch.Tensor,
 ) -> float:
     """Paper-style L2-UVP score in percent."""
-    numerator = (predicted - target).pow(2).sum(dim=-1).mean()
-    centered = reference_samples - reference_samples.mean(dim=0, keepdim=True)
+    numerator = (predicted - target).pow(2).sum(dim=-1).mean().detach()
+    centered = (reference_samples - reference_samples.mean(dim=0, keepdim=True)).detach()
     denominator = centered.pow(2).sum(dim=-1).mean().clamp_min(1e-8)
     return float(100.0 * numerator / denominator)
 
@@ -34,14 +34,14 @@ def transport_cosine_similarity(
     """Paper-style transport cosine normalized by benchmark transport cost."""
     predicted_delta = predicted - source
     target_delta = target - source
-    predicted_energy = predicted_delta.pow(2).sum(dim=-1).mean()
-    target_cost = 0.5 * target_delta.pow(2).sum(dim=-1).mean()
+    predicted_energy = predicted_delta.pow(2).sum(dim=-1).mean().detach()
+    target_cost = (0.5 * target_delta.pow(2).sum(dim=-1).mean()).detach()
     if float(predicted_energy) == 0.0 and float(target_cost) == 0.0:
         return 1.0
     if float(predicted_energy) == 0.0 or float(target_cost) == 0.0:
         return 0.0
-    numerator = (target_delta * predicted_delta).sum(dim=-1).mean()
-    denominator = torch.sqrt((2.0 * target_cost).clamp_min(1e-8) * predicted_energy.clamp_min(1e-8))
+    numerator = (target_delta * predicted_delta).sum(dim=-1).mean().detach()
+    denominator = torch.sqrt((2.0 * target_cost).clamp_min(1e-8) * predicted_energy.clamp_min(1e-8)).detach()
     return float(numerator / denominator)
 
 
@@ -103,3 +103,14 @@ def gradient_error(
     predicted_jac = batch_jacobian(predicted_map, inputs)
     reference_jac = batch_jacobian(reference_map, inputs)
     return float((predicted_jac - reference_jac).pow(2).mean().sqrt().detach())
+
+
+def saddle_residual(
+    forward_map: Callable[[torch.Tensor], torch.Tensor],
+    inverse_map: Callable[[torch.Tensor], torch.Tensor],
+    targets: torch.Tensor,
+) -> float:
+    """Root-mean-square inverse-response residual ||T(\hat{x}(y)) - y||."""
+    inverse = inverse_map(targets)
+    reconstructed = forward_map(inverse)
+    return float((reconstructed - targets).pow(2).mean().sqrt().detach())

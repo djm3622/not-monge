@@ -15,3 +15,4 @@ artifacts/
 data/
 wandb/
 checkpoints/
+.mpl-cache/

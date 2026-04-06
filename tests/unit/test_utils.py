@@ -9,6 +9,7 @@ import pytest
 import torch
 from torch import nn
 
+from src.evaluation.ot_metrics import saddle_residual
 from src.training.losses import (
     ddpm_noise_prediction_loss,
     minimax_potential_objective,
@@ -160,6 +161,22 @@ def test_training_losses_and_scheduler_are_finite() -> None:
     optimizer.step()
     scheduler.step()
     assert scheduler.get_last_lr()[0] > 0.0
+
+
+def test_saddle_residual_matches_inverse_response_consistency() -> None:
+    targets = torch.randn(8, 3)
+
+    def forward_map(x: torch.Tensor) -> torch.Tensor:
+        return 2.0 * x
+
+    def exact_inverse(y: torch.Tensor) -> torch.Tensor:
+        return 0.5 * y
+
+    def bad_inverse(y: torch.Tensor) -> torch.Tensor:
+        return y
+
+    assert saddle_residual(forward_map, exact_inverse, targets) == pytest.approx(0.0)
+    assert saddle_residual(forward_map, bad_inverse, targets) > 0.0
 
 
 def test_move_to_device_and_mean_metrics_work_recursively() -> None:

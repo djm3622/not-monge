@@ -22,6 +22,7 @@ from src.evaluation.ot_metrics import (
     l2_unexplained_variance_percentage,
     map_l2_error,
     maximum_mean_discrepancy,
+    saddle_residual,
     transport_cosine_similarity,
 )
 from src.evaluation.visualization import save_ot_visualizations
@@ -64,7 +65,7 @@ def load_solver_checkpoint(
     return checkpoint
 
 
-def _collect_predictions(
+def collect_ot_predictions(
     solver: BaseOTSolver,
     loader: Any,
     device: torch.device,
@@ -115,7 +116,7 @@ def evaluate_ot_solver(
     """Evaluate a solver according to the configured experiment."""
     _, _, test_loader = dataset_bundle.make_dataloaders()
     max_items = int(config.get("evaluation", {}).get("max_items", 2048))
-    aggregated = _collect_predictions(solver, test_loader, device=device, max_items=max_items)
+    aggregated = collect_ot_predictions(solver, test_loader, device=device, max_items=max_items)
     metrics: dict[str, Any] = {
         "map_l2": float(map_l2_error(aggregated["prediction"], aggregated["ground_truth_map"]).detach())
         if "ground_truth_map" in aggregated
@@ -151,6 +152,12 @@ def evaluate_ot_solver(
             aggregated["ground_truth_map"],
             aggregated["source"],
         )
+    if hasattr(solver, "compute_inverse_map"):
+        metrics["saddle_residual"] = saddle_residual(
+            solver.compute_map,
+            solver.compute_inverse_map,  # type: ignore[arg-type]
+            aggregated["target"].to(device),
+        )
 
     experiment_id = str(config["experiment"]["id"])
     if experiment_id == "c_concavity" and solver.supports_potential:
@@ -179,6 +186,7 @@ def evaluate_ot_solver(
             aggregated,
             Path(output_dir) / str(visualization_cfg.get("dirpath", "visualizations")),
             max_items=int(visualization_cfg.get("max_items", 512)),
+            solver=solver,
         )
         metrics["visualization_path"] = str(image_path)
 
@@ -206,6 +214,10 @@ def train_baseline_run(config: Mapping[str, Any], output_root: str | Path) -> di
         )
         trainer.fit(solver, train_loader, val_loader)
         device = trainer.device
+        checkpoint_dir = output_dir / str(config["training"]["checkpointing"]["dirpath"])
+        best_checkpoint = checkpoint_dir / "best.pt"
+        if best_checkpoint.exists():
+            load_solver_checkpoint(solver, best_checkpoint)
         solver.eval()
     else:
         solver.fit_reference(train_loader, val_loader)
