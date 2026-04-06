@@ -14,6 +14,37 @@ def map_l2_error(predicted: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return (predicted - target).pow(2).mean().sqrt()
 
 
+def l2_unexplained_variance_percentage(
+    predicted: torch.Tensor,
+    target: torch.Tensor,
+    reference_samples: torch.Tensor,
+) -> float:
+    """Paper-style L2-UVP score in percent."""
+    numerator = (predicted - target).pow(2).sum(dim=-1).mean()
+    centered = reference_samples - reference_samples.mean(dim=0, keepdim=True)
+    denominator = centered.pow(2).sum(dim=-1).mean().clamp_min(1e-8)
+    return float(100.0 * numerator / denominator)
+
+
+def transport_cosine_similarity(
+    predicted: torch.Tensor,
+    target: torch.Tensor,
+    source: torch.Tensor,
+) -> float:
+    """Paper-style transport cosine normalized by benchmark transport cost."""
+    predicted_delta = predicted - source
+    target_delta = target - source
+    predicted_energy = predicted_delta.pow(2).sum(dim=-1).mean()
+    target_cost = 0.5 * target_delta.pow(2).sum(dim=-1).mean()
+    if float(predicted_energy) == 0.0 and float(target_cost) == 0.0:
+        return 1.0
+    if float(predicted_energy) == 0.0 or float(target_cost) == 0.0:
+        return 0.0
+    numerator = (target_delta * predicted_delta).sum(dim=-1).mean()
+    denominator = torch.sqrt((2.0 * target_cost).clamp_min(1e-8) * predicted_energy.clamp_min(1e-8))
+    return float(numerator / denominator)
+
+
 def empirical_w2_distance(
     predicted: torch.Tensor,
     target: torch.Tensor,

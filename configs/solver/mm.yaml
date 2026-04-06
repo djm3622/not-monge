@@ -1,15 +1,28 @@
 name: mm
 potential:
-  hidden_dims: [256, 256, 256]
-  activation: silu
-  layer_norm: false
-inner_map:
-  hidden_dims: [256, 256, 256]
-  activation: silu
+  kind: denseicnn_u
+  hidden_dims: [128, 128, 64]
+  rank: 1
+  activation: celu
   dropout: 0.0
-  residual: true
-  layer_norm: false
-critic_steps: 1
-potential_lr: 3.0e-4
-inner_lr: 3.0e-4
+  strong_convexity: 1.0e-4
+  identity_quadratic: 0.0
+  weights_init_std: 0.1
+inverse_potential:
+  kind: denseicnn_u
+  hidden_dims: [128, 128, 64]
+  rank: 1
+  activation: celu
+  dropout: 0.0
+  strong_convexity: 1.0e-4
+  identity_quadratic: 0.0
+  weights_init_std: 0.1
+forward_lr: 1.0e-3
+inverse_lr: 1.0e-3
+inner_steps: 15
+identity_pretrain_steps: 5000
+identity_pretrain_batch_size: 1024
+identity_pretrain_lr: 1.0e-3
+identity_pretrain_blow: 3.0
+identity_pretrain_tol: 1.0e-3
 compile: false

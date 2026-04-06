@@ -28,10 +28,13 @@ def save_ot_visualizations(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    source = _project_points(aggregated["source"], max_items=max_items)
-    prediction = _project_points(aggregated["prediction"], max_items=max_items)
+    reference = aggregated.get("ground_truth_map", aggregated["target"])
+    basis = _projection_basis(reference, max_items=max_items)
+    source = _project_points(aggregated["source"], basis, max_items=max_items)
+    prediction = _project_points(aggregated["prediction"], basis, max_items=max_items)
     target = _project_points(
-        aggregated.get("ground_truth_map", aggregated["target"]),
+        reference,
+        basis,
         max_items=max_items,
     )
     source_extent = _compute_extent(source)
@@ -44,7 +47,11 @@ def save_ot_visualizations(
     font = ImageFont.load_default()
 
     title = "OT Recovery Overview"
-    subtitle = "Projection uses dimensions 0 and 1" if aggregated["source"].shape[-1] > 2 else "Data shown in native 2D coordinates"
+    subtitle = (
+        "Projection uses principal components of the true target measure"
+        if aggregated["source"].shape[-1] > 2
+        else "Data shown in native 2D coordinates"
+    )
     draw.text((48, 28), title, fill=_TEXT, font=font)
     draw.text((48, 52), subtitle, fill=_TEXT, font=font)
 
@@ -88,14 +95,33 @@ def save_ot_visualizations(
     return image_path
 
 
-def _project_points(points: torch.Tensor, max_items: int) -> torch.Tensor:
+def _projection_basis(reference: torch.Tensor, max_items: int) -> torch.Tensor | None:
+    clipped = reference[:max_items].detach().float().cpu()
+    if clipped.ndim != 2:
+        raise ValueError(f"Expected a rank-2 tensor of points, got shape {tuple(clipped.shape)}")
+    if clipped.shape[-1] <= 2:
+        return None
+    return _principal_components(clipped)
+
+
+def _project_points(points: torch.Tensor, basis: torch.Tensor | None, max_items: int) -> torch.Tensor:
     clipped = points[:max_items].detach().float().cpu()
     if clipped.ndim != 2:
         raise ValueError(f"Expected a rank-2 tensor of points, got shape {tuple(clipped.shape)}")
     if clipped.shape[-1] == 1:
         zeros = torch.zeros_like(clipped)
         return torch.cat([clipped, zeros], dim=-1)
-    return clipped[:, :2]
+    if clipped.shape[-1] == 2:
+        return clipped
+    if basis is None:
+        raise ValueError("Expected a projection basis for inputs with dimension greater than 2")
+    return clipped @ basis
+
+
+def _principal_components(points: torch.Tensor) -> torch.Tensor:
+    centered = points - points.mean(dim=0, keepdim=True)
+    _, _, basis = torch.pca_lowrank(centered, q=2)
+    return basis[:, :2]
 
 
 def _compute_extent(*point_sets: torch.Tensor) -> tuple[float, float, float, float]:

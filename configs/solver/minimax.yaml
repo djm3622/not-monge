@@ -1,11 +1,34 @@
 name: minimax
 potential:
-  kind: mlp
-  hidden_dims: [256, 256, 256]
-  activation: silu
-  layer_norm: false
-critic_steps: 2
+  kind: denseicnn_u
+  hidden_dims: [128, 128, 64]
+  rank: 1
+  activation: celu
+  dropout: 0.0
+  strong_convexity: 1.0e-4
+  identity_quadratic: 1.0
+  initialize_identity: false
+  identity_init_scale: 1.0e-2
+inverse_potential:
+  kind: denseicnn_u
+  hidden_dims: [128, 128, 64]
+  rank: 1
+  activation: celu
+  dropout: 0.0
+  strong_convexity: 1.0e-4
+  identity_quadratic: 1.0
+  initialize_identity: false
+  identity_init_scale: 1.0e-2
+forward_steps: 1
+inverse_steps: 15
+objective_weight: 1.0
+correction_enabled: false
+correction_scale: 1.0
+cycle_weight: 0.1
+plan_weight: 0.25
+plan_reg: 1.0
+supervision_weight: 1.0
 weight_decay: 1.0e-4
-map_lr: 3.0e-4
-potential_lr: 3.0e-4
+potential_lr: 1.0e-3
+inverse_lr: 1.0e-3
 compile: false

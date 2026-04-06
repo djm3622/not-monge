@@ -1,10 +1,33 @@
 name: icnn
-potential:
-  hidden_dims: [128, 128, 128]
-  activation: softplus
-  strong_convexity: 0.1
-critic_steps: 1
+forward_potential:
+  kind: denseicnn
+  hidden_dims: [128, 128, 64]
+  rank: 1
+  activation: celu
+  dropout: 0.0
+  strong_convexity: 1.0e-4
+  identity_quadratic: 1.0
+  initialize_identity: false
+  identity_init_scale: 1.0e-2
+inverse_potential:
+  kind: denseicnn
+  hidden_dims: [128, 128, 64]
+  rank: 1
+  activation: celu
+  dropout: 0.0
+  strong_convexity: 1.0e-4
+  identity_quadratic: 1.0
+  initialize_identity: false
+  identity_init_scale: 1.0e-2
+lr: 1.0e-3
+correction_enabled: false
+correction_scale: 1.0
+plan_weight: 1.0
+plan_reg: 1.0
+transport_weight: 0.05
+cycle_weight: 5.0
+conjugacy_weight: 1.0
+mmd_weight: 0.5
+supervision_weight: 1.0
 weight_decay: 1.0e-4
-map_lr: 2.0e-4
-potential_lr: 2.0e-4
 compile: false

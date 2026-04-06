@@ -88,6 +88,11 @@ class OTPMinimaxSolver(MinimaxOTSolver):
         training_config: Mapping[str, Any],
     ) -> None:
         super().__init__(map_config=map_config, solver_config=solver_config, training_config=training_config)
+        # Preserve the attribute names used throughout the OTP implementation after
+        # the shared minimax solver was refactored to forward_/inverse_ naming.
+        self.potential = self.forward_potential
+        self.transport = self.forward_potential
+        self.critic_steps = self.inverse_steps
         smoothing_cfg = dict(solver_config.get("smoothing", {}))
         plan_cfg = dict(solver_config.get("plan", {}))
         regularization_cfg = dict(solver_config.get("regularization", {}))

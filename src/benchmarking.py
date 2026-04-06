@@ -12,25 +12,38 @@ from omegaconf import OmegaConf
 
 from src.datasets.celeba import build_image_dataset_bundle
 from src.datasets.diffusion_latent import build_diffusion_latent_bundle
+from src.datasets.paper_mix3to10 import build_paper_mix3to10_benchmark
 from src.datasets.synthetic_ot import build_synthetic_ot_benchmark
 from src.evaluation.concavity_metrics import convexity_violation, envelope_gap, hessian_spectrum
 from src.evaluation.generative_metrics import frechet_inception_distance, precision_recall_from_features
-from src.evaluation.ot_metrics import empirical_w2_distance, gradient_error, map_l2_error, maximum_mean_discrepancy
+from src.evaluation.ot_metrics import (
+    empirical_w2_distance,
+    gradient_error,
+    l2_unexplained_variance_percentage,
+    map_l2_error,
+    maximum_mean_discrepancy,
+    transport_cosine_similarity,
+)
 from src.evaluation.visualization import save_ot_visualizations
 from src.solvers.base import BaseOTSolver
 from src.solvers.registry import build_solver
 from src.training.trainer import Trainer, move_to_device
 from src.utils.checkpointing import save_checkpoint
 from src.utils.data import maybe_override_batch_size
+from src.utils.seed import seed_all
 
 
 def resolve_ot_dataset(config: Mapping[str, Any]) -> Any:
     """Instantiate the requested OT dataset bundle."""
     training_cfg = dict(config["training"])
-    fairness_batch_size = training_cfg.get("fairness", {}).get("batch_size")
-    dataset_cfg = maybe_override_batch_size(dict(config["dataset"]), fairness_batch_size)
+    dataset_cfg = dict(config["dataset"])
+    if dataset_cfg["name"] != "paper_mix3to10":
+        fairness_batch_size = training_cfg.get("fairness", {}).get("batch_size")
+        dataset_cfg = maybe_override_batch_size(dataset_cfg, fairness_batch_size)
     if dataset_cfg["name"] == "synthetic_ot":
         return build_synthetic_ot_benchmark(dataset_cfg)
+    if dataset_cfg["name"] == "paper_mix3to10":
+        return build_paper_mix3to10_benchmark(dataset_cfg)
     if dataset_cfg["name"] == "diffusion_latent":
         return build_diffusion_latent_bundle(dataset_cfg)
     if dataset_cfg["name"] in {"celeba", "cifar10", "fake_data"}:
@@ -110,11 +123,33 @@ def evaluate_ot_solver(
         "pushforward_w2": empirical_w2_distance(aggregated["prediction"], aggregated["target"]),
         "mmd": maximum_mean_discrepancy(aggregated["prediction"], aggregated["target"]),
     }
-    if "ground_truth_map" in aggregated and hasattr(dataset_bundle, "ground_truth_potential"):
+    ground_truth_potential = getattr(dataset_bundle, "ground_truth_potential", None)
+    if "ground_truth_map" in aggregated and ground_truth_potential is not None:
         metrics["gradient_error"] = gradient_error(
             solver.compute_map,
-            lambda x: dataset_bundle.ground_truth_potential.gradient(x, create_graph=True),
+            lambda x: ground_truth_potential.gradient(x, create_graph=True),
             aggregated["source"].to(device),
+        )
+        metrics["l2_uvp"] = l2_unexplained_variance_percentage(
+            aggregated["prediction"],
+            aggregated["ground_truth_map"],
+            aggregated["ground_truth_map"],
+        )
+        metrics["transport_cos"] = transport_cosine_similarity(
+            aggregated["prediction"],
+            aggregated["ground_truth_map"],
+            aggregated["source"],
+        )
+    elif "ground_truth_map" in aggregated:
+        metrics["l2_uvp"] = l2_unexplained_variance_percentage(
+            aggregated["prediction"],
+            aggregated["ground_truth_map"],
+            aggregated["ground_truth_map"],
+        )
+        metrics["transport_cos"] = transport_cosine_similarity(
+            aggregated["prediction"],
+            aggregated["ground_truth_map"],
+            aggregated["source"],
         )
 
     experiment_id = str(config["experiment"]["id"])
@@ -152,6 +187,10 @@ def evaluate_ot_solver(
 
 def train_baseline_run(config: Mapping[str, Any], output_root: str | Path) -> dict[str, Any]:
     """Run training or reference fitting for one OT baseline."""
+    seed_all(
+        int(config["training"]["seed"]),
+        deterministic=bool(config["training"].get("deterministic", False)),
+    )
     dataset_bundle = resolve_ot_dataset(config)
     train_loader, val_loader, _ = dataset_bundle.make_dataloaders()
     solver = build_solver(config["model"], config["solver"], config["training"])
@@ -183,8 +222,9 @@ def train_baseline_run(config: Mapping[str, Any], output_root: str | Path) -> di
         solver.to(device)
         solver.eval()
 
-    if hasattr(dataset_bundle, "ground_truth_potential"):
-        dataset_bundle.ground_truth_potential.to(device)
+    ground_truth_potential = getattr(dataset_bundle, "ground_truth_potential", None)
+    if ground_truth_potential is not None:
+        ground_truth_potential.to(device)
     metrics = evaluate_ot_solver(
         solver,
         dataset_bundle,
@@ -212,8 +252,9 @@ def eval_baseline_run(
     output_dir = Path(output_root)
     output_dir.mkdir(parents=True, exist_ok=True)
     solver.to(device)
-    if hasattr(dataset_bundle, "ground_truth_potential"):
-        dataset_bundle.ground_truth_potential.to(device)
+    ground_truth_potential = getattr(dataset_bundle, "ground_truth_potential", None)
+    if ground_truth_potential is not None:
+        ground_truth_potential.to(device)
     metrics = evaluate_ot_solver(
         solver,
         dataset_bundle,
@@ -234,7 +275,10 @@ def build_result_record(
 ) -> dict[str, Any]:
     """Build a standardized result record for downstream tables."""
     fairness = dict(config["training"].get("fairness", {}))
-    batch_size = int(fairness.get("batch_size", config["dataset"].get("batch_size", 0)))
+    if str(config["dataset"].get("name", "")) == "paper_mix3to10":
+        batch_size = int(config["dataset"].get("batch_size", 0))
+    else:
+        batch_size = int(fairness.get("batch_size", config["dataset"].get("batch_size", 0)))
     return {
         "solver_id": solver.solver_name,
         "solver_group": solver.solver_group,
