@@ -31,6 +31,7 @@ from src.solvers.base import BaseOTSolver
 from src.solvers.registry import build_solver
 from src.training.trainer import Trainer, mean_metrics, move_to_device
 from src.utils.checkpointing import save_checkpoint
+from src.utils.device import infer_device
 from src.utils.data import maybe_override_batch_size
 from src.utils.seed import seed_all
 
@@ -126,6 +127,14 @@ def evaluate_ot_solver(
         else None,
         "pushforward_w2": empirical_w2_distance(aggregated["prediction"], aggregated["target"]),
         "mmd": maximum_mean_discrepancy(aggregated["prediction"], aggregated["target"]),
+        "gradient_error": None,
+        "l2_uvp": None,
+        "transport_cos": None,
+        "saddle_residual": None,
+        "visualization_path": None,
+        "transport_figure_path": None,
+        "saddle_figure_path": None,
+        "saddle_sample_paths": [],
     }
     validation_metrics = mean_metrics(
         [solver.validation_step(move_to_device(batch, device)) for batch in test_loader]
@@ -189,13 +198,21 @@ def evaluate_ot_solver(
         output_dir is not None
         and bool(visualization_cfg.get("enabled", False))
     ):
+        visualization_dir = Path(output_dir) / str(visualization_cfg.get("dirpath", "visualizations"))
         image_path = save_ot_visualizations(
             aggregated,
-            Path(output_dir) / str(visualization_cfg.get("dirpath", "visualizations")),
+            visualization_dir,
             max_items=int(visualization_cfg.get("max_items", 512)),
             solver=solver,
+            saddle_examples=int(visualization_cfg.get("saddle_examples", 3)),
         )
         metrics["visualization_path"] = str(image_path)
+        metrics["transport_figure_path"] = str(image_path)
+        saddle_path = visualization_dir / "saddle_geometry.png"
+        metrics["saddle_figure_path"] = str(saddle_path) if saddle_path.exists() else None
+        sample_dir = visualization_dir / "saddle_samples"
+        if sample_dir.exists():
+            metrics["saddle_sample_paths"] = [str(path) for path in sorted(sample_dir.glob("saddle_point_*.png"))]
 
     return metrics
 
@@ -236,7 +253,9 @@ def train_baseline_run(config: Mapping[str, Any], output_root: str | Path) -> di
         }
         checkpoint_dir = output_dir / str(config["training"]["checkpointing"]["dirpath"])
         save_checkpoint(checkpoint, checkpoint_dir / "best.pt")
-        save_checkpoint(checkpoint, checkpoint_dir / "epoch_0000.pt")
+        save_every_n_epochs = int(config["training"]["checkpointing"].get("save_every_n_epochs", 1) or 0)
+        if save_every_n_epochs > 0:
+            save_checkpoint(checkpoint, checkpoint_dir / "epoch_0000.pt")
         device = torch.device("cpu")
         solver.to(device)
         solver.eval()
@@ -267,7 +286,7 @@ def eval_baseline_run(
     solver = build_solver(config["model"], config["solver"], config["training"])
     load_solver_checkpoint(solver, checkpoint_path)
     solver.eval()
-    device = torch.device("cpu")
+    device = infer_device(str(config["training"].get("device", "auto")))
     output_dir = Path(output_root)
     output_dir.mkdir(parents=True, exist_ok=True)
     solver.to(device)
