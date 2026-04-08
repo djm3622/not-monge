@@ -365,7 +365,7 @@ class MMBatchOTSolver(TwoPotentialSolver):
         w2_estimate_yx = -objective_yx.detach() - _monitor_w2_term(batch["target"], batch["source"], inverse_yx.detach())
         return {
             "train/objective": float(objective.detach()),
-            "train/w2_estimate": float(0.5 * (w2_estimate_xy + w2_estimate_yx)),
+            "train/w2_estimate": float((0.5 * (w2_estimate_xy + w2_estimate_yx)).detach()),
             "train/map_l2": _batch_map_l2(batch, transported),
         }
 
@@ -418,34 +418,32 @@ class QCOTSolver(TwoPotentialSolver):
         cost = 0.5 * self.k_constant * torch.cdist(target, source).pow(2).detach().cpu().numpy()
         plan = ot.emd(weights, weights, cost)
         plan_tensor = torch.from_numpy(np.asarray(plan, dtype=np.float32)).to(source.device)
-        mapping = torch.argmax(plan_tensor, dim=0)
-        ordered_target = target[mapping]
-        target_dif = ordered_target - source
+        column_sums = plan_tensor.sum(dim=0).clamp_min(1.0e-8).unsqueeze(1)
+        barycentric_target = plan_tensor.transpose(0, 1) @ target / column_sums
 
         _, log = ot.emd(weights, weights, cost, log=True)
-        dual_target = torch.from_numpy(np.asarray(log["u"], dtype=np.float32)).to(source.device)
         dual_source = torch.from_numpy(np.asarray(log["v"], dtype=np.float32)).to(source.device)
 
         source = source.requires_grad_(True)
-        output_target = self.k_constant * (
-            potential(target).view(-1) - 0.5 * target.pow(2).sum(dim=1)
-        )
+        # For quadratic OT, the Brenier potential satisfies T(x) = grad phi(x)
+        # with source-side dual u(x) = 0.5||x||^2 - phi(x).
         output_source = self.k_constant * (
-            potential(source).view(-1) - 0.5 * source.pow(2).sum(dim=1)
+            0.5 * source.pow(2).sum(dim=1) - potential(source).view(-1)
         )
-        regression = 0.5 * F.mse_loss(output_target.mean(), dual_target.mean()) + 0.5 * F.mse_loss(output_source, dual_source)
+        regression = F.mse_loss(
+            output_source - output_source.mean(),
+            dual_source - dual_source.mean(),
+        )
 
         gradients = torch.autograd.grad(
             outputs=output_source.sum(),
             inputs=source,
             create_graph=True,
         )[0]
-        regularizer = 0.5 * (
-            gradients.norm(dim=1) / (2.0 * math.sqrt(self.k_constant))
-            - 0.5 * math.sqrt(self.k_constant) * target_dif.norm(dim=1)
-        ).pow(2).mean()
+        transported = source - gradients / self.k_constant
+        regularizer = F.mse_loss(transported, barycentric_target.detach())
         loss = regression + self.regularization_weight * regularizer
-        return loss, ordered_target.detach()
+        return loss, barycentric_target.detach()
 
     def training_step(
         self,

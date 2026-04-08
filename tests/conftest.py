@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from src.datasets.celeba import build_image_dataset_bundle
+from src.datasets.makkuva_2d import build_makkuva_2d_benchmark
 from src.datasets.synthetic_ot import SyntheticOTBenchmark, build_synthetic_ot_benchmark
 from src.utils.seed import seed_all
 
@@ -121,6 +122,25 @@ def tiny_synthetic_ot_config() -> dict[str, Any]:
         "generator_hidden_dims": [8, 8],
         "strong_convexity": 0.1,
         "seed": 7,
+    }
+
+
+@pytest.fixture
+def tiny_makkuva_checkerboard_config() -> dict[str, Any]:
+    return {
+        "name": "makkuva_2d",
+        "input_dim": 2,
+        "batch_size": 8,
+        "num_workers": 0,
+        "seed": 7,
+        "source_distribution": "checker_board_five",
+        "target_distribution": "checker_board_four",
+        "scale": 1.0,
+        "variance": 0.5,
+        "steps_per_epoch": 2,
+        "n_val": 16,
+        "n_test": 16,
+        "standardize_samples": 64,
     }
 
 
@@ -276,29 +296,27 @@ def solver_config_factory() -> Callable[[str], dict[str, Any]]:
             },
             "otp": {
                 "name": "otp",
-                "critic_steps": 1,
-                "map_lr": 1.0e-3,
+                "transport_steps": 2,
+                "transport_lr": 1.0e-3,
                 "potential_lr": 1.0e-3,
+                "quadratic_scale": 0.5,
+                "use_c_concave_parameterization": True,
                 "potential": {
-                    "kind": "mlp",
+                    "kind": "denseicnn",
                     "hidden_dims": [8, 8],
-                    "activation": "silu",
-                    "layer_norm": False,
+                    "activation": "celu",
+                    "strong_convexity": 0.0,
+                    "identity_quadratic": 0.0,
                 },
-                "smoothing": {
+                "noise": {
+                    "kind": "additive_gaussian",
                     "sigma_start": 0.05,
-                    "sigma_end": 0.0,
+                    "sigma_end": 0.01,
                     "anneal_steps": 16,
                 },
-                "plan": {
-                    "enabled": True,
-                    "reg": 1.0,
-                    "supervision_weight": 0.5,
-                    "entropy_weight": 0.0,
-                },
-                "regularization": {
-                    "potential_gp_weight": 1.0,
-                    "potential_l2_weight": 1.0e-3,
+                "optimizer": {
+                    "betas": [0.0, 0.9],
+                    "weight_decay": 0.0,
                 },
             },
             "flow": {
@@ -339,6 +357,52 @@ def solver_config_factory() -> Callable[[str], dict[str, Any]]:
                 "phase1_ratio": 0.5,
                 "gradient_penalty_weight": 1.0,
             },
+            "makkuva_icnn_cvx": {
+                "name": "makkuva_icnn_cvx",
+                "f_potential": {
+                    "kind": "makkuva_icnn",
+                    "hidden_dims": [8, 8],
+                    "activation": "leaky_relu",
+                    "negative_slope": 0.2,
+                    "weights_init_std": 0.1,
+                },
+                "g_potential": {
+                    "kind": "makkuva_icnn",
+                    "hidden_dims": [8, 8],
+                    "activation": "leaky_relu",
+                    "negative_slope": 0.2,
+                    "weights_init_std": 0.1,
+                },
+                "lr": 1.0e-3,
+                "beta1": 0.5,
+                "beta2": 0.9,
+                "inner_steps": 1,
+                "lambda_cvx": 1.0,
+                "f_project_convex": True,
+                "g_project_convex": False,
+            },
+            "makkuva_mlp_ablation": {
+                "name": "makkuva_mlp_ablation",
+                "f_potential": {
+                    "kind": "mlp",
+                    "hidden_dims": [8, 8],
+                    "activation": "gelu",
+                    "layer_norm": True,
+                },
+                "g_potential": {
+                    "kind": "mlp",
+                    "hidden_dims": [8, 8],
+                    "activation": "gelu",
+                    "layer_norm": True,
+                },
+                "lr": 1.0e-3,
+                "beta1": 0.5,
+                "beta2": 0.9,
+                "inner_steps": 1,
+                "lambda_cvx": 0.0,
+                "f_project_convex": False,
+                "g_project_convex": False,
+            },
         }
         return copy.deepcopy(configs[name])
 
@@ -348,6 +412,11 @@ def solver_config_factory() -> Callable[[str], dict[str, Any]]:
 @pytest.fixture
 def synthetic_bundle(tiny_synthetic_ot_config: dict[str, Any]) -> SyntheticOTBenchmark:
     return build_synthetic_ot_benchmark(tiny_synthetic_ot_config)
+
+
+@pytest.fixture
+def makkuva_bundle(tiny_makkuva_checkerboard_config: dict[str, Any]) -> Any:
+    return build_makkuva_2d_benchmark(copy.deepcopy(tiny_makkuva_checkerboard_config))
 
 
 @pytest.fixture

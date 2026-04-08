@@ -17,12 +17,12 @@ inverse_potential:
   strong_convexity: 1.0e-4
   identity_quadratic: 0.0
   weights_init_std: 0.1
-forward_lr: 1.0e-3
+forward_lr: 1.0e-4
 k_constant: 1.0
 gamma: 0.1
-regularization_weight: 0.4
+regularization_weight: 128.0
 identity_pretrain_steps: 5000
-identity_pretrain_batch_size: 64
+identity_pretrain_batch_size: 2048
 identity_pretrain_lr: 1.0e-3
 identity_pretrain_blow: 3.0
 identity_pretrain_tol: 1.0e-3

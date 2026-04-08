@@ -31,24 +31,30 @@ def test_otp_compute_loss_and_regularization(
     ot_model_config: dict[str, object],
     tiny_training_config: dict[str, object],
     ot_batch: dict[str, torch.Tensor],
+    disabled_grad_scaler: torch.amp.GradScaler,
+    null_autocast: object,
 ) -> None:
     solver = build_solver(
         ot_model_config,
         solver_config_factory("otp"),  # type: ignore[operator]
         tiny_training_config,
     )
-    losses = solver.compute_loss(ot_batch, smoothing_sigma=0.02)
-    regs = solver.regularization(
-        batch={"source": losses["source"], "target": losses["target"]},
-        transported=losses["transported"],
-        potential_real=losses["potential_real"],
-        potential_fake=losses["potential_fake"],
-        plan=losses["plan"],
+    solver.configure_optimizers(total_steps=8)
+    potential = solver.compute_potential(ot_batch["target"])
+    assert potential is not None
+    assert torch.isfinite(potential).all()
+    expected = solver.quadratic_scale * ot_batch["target"].pow(2).sum(dim=-1, keepdim=True) - solver.potential_backbone(
+        ot_batch["target"]
     )
-    for key in ["critic_objective", "map_objective", "plan_supervision", "potential_gp"]:
-        value = losses[key] if key in losses else regs[key]
-        assert torch.isfinite(value).all()
-    assert losses["transported"].shape == ot_batch["source"].shape
+    assert torch.allclose(potential, expected)
+    initial_noise = solver.current_noise_level()
+    solver.training_step(
+        ot_batch,
+        scaler=disabled_grad_scaler,
+        autocast_context=null_autocast,
+        gradient_clip_norm=None,
+    )
+    assert solver.current_noise_level() <= initial_noise + 1.0e-8
 
 
 def test_otp_backward_produces_finite_gradients(
@@ -56,6 +62,8 @@ def test_otp_backward_produces_finite_gradients(
     ot_model_config: dict[str, object],
     tiny_training_config: dict[str, object],
     easy_ot_batch: dict[str, torch.Tensor],
+    disabled_grad_scaler: torch.amp.GradScaler,
+    null_autocast: object,
 ) -> None:
     solver = build_solver(
         ot_model_config,
@@ -63,20 +71,12 @@ def test_otp_backward_produces_finite_gradients(
         tiny_training_config,
     )
     solver.configure_optimizers(total_steps=2)
-    losses = solver.compute_loss(easy_ot_batch, smoothing_sigma=0.0)
-    regs = solver.regularization(
-        batch={"source": losses["source"], "target": losses["target"]},
-        transported=losses["transported"],
-        potential_real=losses["potential_real"],
-        potential_fake=losses["potential_fake"],
-        plan=losses["plan"],
+    solver.training_step(
+        easy_ot_batch,
+        scaler=disabled_grad_scaler,
+        autocast_context=null_autocast,
+        gradient_clip_norm=None,
     )
-    objective = (
-        losses["map_objective"]
-        + solver.plan_supervision_weight * regs["plan_supervision"]
-        + solver.plan_entropy_weight * regs["negative_entropy"]
-    )
-    objective.backward()
     gradients = [parameter.grad for parameter in solver.parameters() if parameter.requires_grad and parameter.grad is not None]
     assert gradients
     assert all(torch.isfinite(gradient).all() for gradient in gradients)

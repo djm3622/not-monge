@@ -30,7 +30,10 @@ def _optimizer_parameters(optimizer: torch.optim.Optimizer) -> list[torch.nn.Par
     ]
 
 
-@pytest.mark.parametrize("solver_name", ["minimax", "icnn", "mm", "mmv2"])
+@pytest.mark.parametrize(
+    "solver_name",
+    ["minimax", "icnn", "makkuva_icnn_cvx", "makkuva_mlp_ablation", "mm", "mmv2"],
+)
 def test_multi_optimizer_solvers_receive_gradients(
     solver_name: str,
     solver_config_factory: object,

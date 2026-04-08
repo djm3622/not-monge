@@ -5,6 +5,7 @@ import torch
 
 from src.models.potential import (
     InputConvexNeuralNetwork,
+    MakkuvaInputConvexNeuralNetwork,
     NonNegativeLinear,
     PotentialMLP,
     build_potential,
@@ -23,6 +24,10 @@ pytestmark = pytest.mark.unit
         (
             InputConvexNeuralNetwork,
             {"input_dim": 2, "hidden_dims": [8, 8], "activation": "softplus", "strong_convexity": 0.1},
+        ),
+        (
+            MakkuvaInputConvexNeuralNetwork,
+            {"input_dim": 2, "hidden_dims": [8, 8], "activation": "leaky_relu", "negative_slope": 0.2},
         ),
     ],
 )
@@ -47,6 +52,10 @@ def test_potential_outputs_scalar_and_is_finite(
         (
             InputConvexNeuralNetwork,
             {"input_dim": 2, "hidden_dims": [8, 8], "activation": "softplus", "strong_convexity": 0.1},
+        ),
+        (
+            MakkuvaInputConvexNeuralNetwork,
+            {"input_dim": 2, "hidden_dims": [8, 8], "activation": "leaky_relu", "negative_slope": 0.2},
         ),
     ],
 )
@@ -79,6 +88,20 @@ def test_icnn_hidden_weights_are_non_negative() -> None:
     assert torch.all(icnn.output_z.weight >= 0.0)
 
 
+def test_makkuva_icnn_convexify_clamps_hidden_weights() -> None:
+    icnn = MakkuvaInputConvexNeuralNetwork(
+        input_dim=2,
+        hidden_dims=[8, 8, 8],
+        activation="leaky_relu",
+        negative_slope=0.2,
+    )
+    with torch.no_grad():
+        for parameter in icnn.positive_parameters():
+            parameter.fill_(-0.5)
+    icnn.convexify()
+    assert all(torch.all(parameter >= 0.0) for parameter in icnn.positive_parameters())
+
+
 def test_build_potential_returns_expected_types() -> None:
     mlp = build_potential(
         {
@@ -97,5 +120,15 @@ def test_build_potential_returns_expected_types() -> None:
             "strong_convexity": 0.1,
         }
     )
+    makkuva_icnn = build_potential(
+        {
+            "kind": "makkuva_icnn",
+            "input_dim": 2,
+            "hidden_dims": [8, 8],
+            "activation": "leaky_relu",
+            "negative_slope": 0.2,
+        }
+    )
     assert isinstance(mlp, PotentialMLP)
     assert isinstance(icnn, InputConvexNeuralNetwork)
+    assert isinstance(makkuva_icnn, MakkuvaInputConvexNeuralNetwork)

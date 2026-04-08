@@ -18,7 +18,7 @@ inverse_potential:
   identity_quadratic: 0.0
   weights_init_std: 0.1
 lr: 1.0e-3
-cycle_weight: 64.0
+cycle_weight: 32.0
 identity_pretrain_steps: 5000
 identity_pretrain_batch_size: 1024
 identity_pretrain_lr: 1.0e-3

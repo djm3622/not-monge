@@ -12,6 +12,7 @@ from omegaconf import OmegaConf
 
 from src.datasets.celeba import build_image_dataset_bundle
 from src.datasets.diffusion_latent import build_diffusion_latent_bundle
+from src.datasets.makkuva_2d import build_makkuva_2d_benchmark
 from src.datasets.paper_mix3to10 import build_paper_mix3to10_benchmark
 from src.datasets.synthetic_ot import build_synthetic_ot_benchmark
 from src.evaluation.concavity_metrics import convexity_violation, envelope_gap, hessian_spectrum
@@ -28,7 +29,7 @@ from src.evaluation.ot_metrics import (
 from src.evaluation.visualization import save_ot_visualizations
 from src.solvers.base import BaseOTSolver
 from src.solvers.registry import build_solver
-from src.training.trainer import Trainer, move_to_device
+from src.training.trainer import Trainer, mean_metrics, move_to_device
 from src.utils.checkpointing import save_checkpoint
 from src.utils.data import maybe_override_batch_size
 from src.utils.seed import seed_all
@@ -43,6 +44,8 @@ def resolve_ot_dataset(config: Mapping[str, Any]) -> Any:
         dataset_cfg = maybe_override_batch_size(dataset_cfg, fairness_batch_size)
     if dataset_cfg["name"] == "synthetic_ot":
         return build_synthetic_ot_benchmark(dataset_cfg)
+    if dataset_cfg["name"] == "makkuva_2d":
+        return build_makkuva_2d_benchmark(dataset_cfg)
     if dataset_cfg["name"] == "paper_mix3to10":
         return build_paper_mix3to10_benchmark(dataset_cfg)
     if dataset_cfg["name"] == "diffusion_latent":
@@ -124,6 +127,11 @@ def evaluate_ot_solver(
         "pushforward_w2": empirical_w2_distance(aggregated["prediction"], aggregated["target"]),
         "mmd": maximum_mean_discrepancy(aggregated["prediction"], aggregated["target"]),
     }
+    validation_metrics = mean_metrics(
+        [solver.validation_step(move_to_device(batch, device)) for batch in test_loader]
+    )
+    if "val/w2_estimate" in validation_metrics:
+        metrics["w2_estimate"] = float(validation_metrics["val/w2_estimate"])
     ground_truth_potential = getattr(dataset_bundle, "ground_truth_potential", None)
     if "ground_truth_map" in aggregated and ground_truth_potential is not None:
         metrics["gradient_error"] = gradient_error(
@@ -180,7 +188,6 @@ def evaluate_ot_solver(
     if (
         output_dir is not None
         and bool(visualization_cfg.get("enabled", False))
-        and "ground_truth_map" in aggregated
     ):
         image_path = save_ot_visualizations(
             aggregated,
@@ -291,6 +298,11 @@ def build_result_record(
         batch_size = int(config["dataset"].get("batch_size", 0))
     else:
         batch_size = int(fairness.get("batch_size", config["dataset"].get("batch_size", 0)))
+    optimizer_name = str(fairness.get("optimizer", "adamw"))
+    scheduler_name = str(fairness.get("scheduler", "onecycle"))
+    if solver.supports_training and solver.optimizers:
+        optimizer_name = solver.optimizers[0].__class__.__name__.lower()
+        scheduler_name = solver.schedulers[0].__class__.__name__.lower() if solver.schedulers else "none"
     return {
         "solver_id": solver.solver_name,
         "solver_group": solver.solver_group,
@@ -299,8 +311,8 @@ def build_result_record(
         "seed": int(config["training"]["seed"]),
         "batch_size": batch_size,
         "max_steps": int(config["training"].get("max_steps") or fairness.get("max_steps", 0)),
-        "optimizer": str(fairness.get("optimizer", "adamw")),
-        "scheduler": str(fairness.get("scheduler", "onecycle")),
+        "optimizer": optimizer_name,
+        "scheduler": scheduler_name,
         "metrics": dict(metrics),
     }
 

@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from src.models.common import get_activation
+from src.models.makkuva_icnn import MakkuvaInputConvexNeuralNetwork
 
 
 class PotentialMLP(nn.Module):
@@ -259,6 +260,16 @@ def build_potential(config: dict | Iterable[tuple[str, object]]) -> nn.Module:
     kind = str(cfg.get("kind", cfg.get("name", "mlp"))).lower()
     identity_init = bool(cfg.get("initialize_identity", False))
     identity_scale = float(cfg.get("identity_init_scale", 1.0e-2))
+    if "makkuva_icnn" in kind:
+        module = MakkuvaInputConvexNeuralNetwork(
+            input_dim=int(cfg["input_dim"]),
+            hidden_dims=list(cfg["hidden_dims"]),
+            activation=str(cfg.get("activation", "leaky_relu")),
+            negative_slope=float(cfg.get("negative_slope", 0.2)),
+            input_quadratic=float(cfg.get("input_quadratic", 0.0)),
+            weights_init_std=float(cfg.get("weights_init_std", 0.1)),
+        )
+        return _scale_module_parameters(module, identity_scale if identity_init else 1.0)
     if "denseicnn_u" in kind or "dense_icnn_u" in kind:
         module = DenseInputConvexNeuralNetwork(
             input_dim=int(cfg["input_dim"]),

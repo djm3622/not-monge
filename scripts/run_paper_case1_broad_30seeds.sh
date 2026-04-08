@@ -18,13 +18,18 @@ export PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-/tmp/pycache}"
 SEEDS_DEFAULT="686499,928801,48156,431753,526655,480953,178898,700645,62001,192385,911170,307368,546159,381730,917274,910268,301123,218738,982909,870264,948176,164608,892045,767301,576270,525000,7029,644131,480217,389379"
 
 SEEDS="${SEEDS:-$SEEDS_DEFAULT}"
-SOLVERS="${SOLVERS:-gaussian,mm,mmv2,tw2,mm_b,qc}"
-FIGURE_SOLVERS="${FIGURE_SOLVERS:-mm,mmv2}"
+SOLVERS="${SOLVERS:-gaussian,mm,mmv2,otp,tw2,mm_b,qc}"
+if [[ "${FIGURE_SOLVERS+x}" == "x" ]]; then
+  FIGURE_SOLVERS="$FIGURE_SOLVERS"
+else
+  FIGURE_SOLVERS="mm,mmv2,otp"
+fi
 CACHE_VERSION="${CACHE_VERSION:-paper_ref_d64_b256_s25k}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/paper_case1_full_compare_broad_30seeds_v3}"
 TRAIN_DEVICE="${TRAIN_DEVICE:-cpu}"
 EVAL_ITEMS="${EVAL_ITEMS:-4096}"
 VISUALIZATION_ITEMS="${VISUALIZATION_ITEMS:-512}"
+SPEC_OVERRIDES="${SPEC_OVERRIDES:-}"
 
 ARGS=(
   --seeds "$SEEDS"
@@ -36,6 +41,10 @@ ARGS=(
   --visualization-items "$VISUALIZATION_ITEMS"
   --device "$TRAIN_DEVICE"
 )
+
+if [[ -n "$SPEC_OVERRIDES" ]]; then
+  ARGS+=(--spec-overrides "$SPEC_OVERRIDES")
+fi
 
 if [[ "${RERUN:-0}" == "1" ]]; then
   ARGS+=(--rerun)
@@ -50,6 +59,7 @@ Running case study 1 broad comparison
   cache_version: $CACHE_VERSION
   output_root: $OUTPUT_ROOT
   device: $TRAIN_DEVICE
+  spec_overrides: ${SPEC_OVERRIDES:-<none>}
 EOF
 
 exec "$PYTHON" scripts/paper_case1_full_compare.py "${ARGS[@]}"

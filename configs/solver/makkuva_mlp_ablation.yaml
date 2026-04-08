@@ -1,0 +1,21 @@
+name: makkuva_mlp_ablation
+f_potential:
+  kind: mlp
+  hidden_dims: [64, 64, 64, 64]
+  activation: gelu
+  layer_norm: true
+g_potential:
+  kind: mlp
+  hidden_dims: [64, 64, 64, 64]
+  activation: gelu
+  layer_norm: true
+lr: 1.0e-4
+beta1: 0.5
+beta2: 0.9
+weight_decay: 1.0e-4
+inner_steps: 10
+lambda_cvx: 0.0
+transport_l2_penalty: 1.0
+potential_l2_penalty: 1.0e-2
+f_project_convex: false
+g_project_convex: false

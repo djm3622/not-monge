@@ -1,8 +1,6 @@
 """Custom trainer shared by OT and diffusion experiments."""
 
 from __future__ import annotations
-
-import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, MutableMapping, Protocol
@@ -136,7 +134,7 @@ class Trainer:
             config=full_config,
             wandb_mode=str(self.config.logging.get("wandb_mode", "online")),
         )
-        self.best_metric = math.inf
+        self.best_metric: float | None = None
         self.global_step = 0
 
     def _save_epoch_checkpoint(
@@ -146,19 +144,29 @@ class Trainer:
         val_metrics: Mapping[str, float] | None,
     ) -> None:
         checkpoint_dir = self.output_dir / str(self.config.checkpointing["dirpath"])
-        checkpoint_path = checkpoint_dir / f"epoch_{epoch:04d}.pt"
         state = {
             "epoch": epoch,
             "global_step": self.global_step,
             "task": task.state_dict(),
             "val_metrics": dict(val_metrics or {}),
         }
-        save_checkpoint(state, checkpoint_path)
+        save_every_n_epochs = int(self.config.checkpointing.get("save_every_n_epochs", 1) or 0)
+        if save_every_n_epochs > 0 and epoch % save_every_n_epochs == 0:
+            checkpoint_path = checkpoint_dir / f"epoch_{epoch:04d}.pt"
+            save_checkpoint(state, checkpoint_path)
         monitor = str(self.config.checkpointing.get("monitor", ""))
         if val_metrics is None or monitor not in val_metrics:
             return
+        mode = str(self.config.checkpointing.get("mode", "min")).lower()
+        if mode not in {"min", "max"}:
+            raise ValueError(f"Unsupported checkpoint mode '{mode}'")
         current = float(val_metrics[monitor])
-        if current < self.best_metric:
+        is_better = (
+            self.best_metric is None
+            or (mode == "min" and current < self.best_metric)
+            or (mode == "max" and current > self.best_metric)
+        )
+        if is_better:
             self.best_metric = current
             save_checkpoint(state, checkpoint_dir / "best.pt")
 

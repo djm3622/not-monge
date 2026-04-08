@@ -36,6 +36,7 @@ dev = [
 [tool.setuptools]
 packages = [
   "src",
+  "src.diagnostics",
   "src.models",
   "src.solvers",
   "src.datasets",

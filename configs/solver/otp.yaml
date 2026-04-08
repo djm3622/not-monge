@@ -1,23 +1,24 @@
 name: otp
 potential:
-  kind: mlp
-  hidden_dims: [256, 256, 256]
-  activation: silu
-  layer_norm: false
-critic_steps: 2
-weight_decay: 1.0e-4
-map_lr: 3.0e-4
+  kind: denseicnn
+  hidden_dims: [128, 128, 64]
+  rank: 1
+  activation: celu
+  dropout: 0.0
+  strong_convexity: 0.0
+  identity_quadratic: 0.0
+transport_steps: 20
+transport_lr: 3.0e-4
 potential_lr: 3.0e-4
-smoothing:
-  sigma_start: 0.05
-  sigma_end: 0.0
-  anneal_steps: 1000
-plan:
-  enabled: true
-  reg: 0.1
-  supervision_weight: 0.5
-  entropy_weight: 0.0
-regularization:
-  potential_gp_weight: 1.0
-  potential_l2_weight: 1.0e-3
+quadratic_scale: 0.5
+use_c_concave_parameterization: true
+noise:
+  kind: additive_gaussian
+  sigma_start: 0.2
+  sigma_end: 0.01
+  update_every: 0
+optimizer:
+  betas: [0.0, 0.9]
+  weight_decay: 0.0
+gradient_clip_enabled: false
 compile: false

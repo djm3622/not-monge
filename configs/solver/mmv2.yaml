@@ -21,7 +21,7 @@ forward_lr: 1.0e-3
 inverse_lr: 1.0e-3
 inner_steps: 15
 identity_pretrain_steps: 5000
-identity_pretrain_batch_size: 1024
+identity_pretrain_batch_size: 2048
 identity_pretrain_lr: 1.0e-3
 identity_pretrain_blow: 3.0
 identity_pretrain_tol: 1.0e-3

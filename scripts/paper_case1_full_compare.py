@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 import subprocess
@@ -54,8 +55,8 @@ DEFAULT_SEEDS = [
     480217,
     389379,
 ]
-DEFAULT_SOLVERS = ["gaussian", "mm", "mmv2", "tw2", "mm_b", "qc"]
-DEFAULT_FIGURE_SOLVERS = ["mm", "mmv2"]
+DEFAULT_SOLVERS = ["gaussian", "mm", "mmv2", "otp", "tw2", "mm_b", "qc"]
+DEFAULT_FIGURE_SOLVERS = ["mm", "mmv2", "otp"]
 DEFAULT_CACHE_VERSION = "paper_ref_d64_b256_s25k"
 
 SOLVER_SPECS: dict[str, dict[str, object]] = {
@@ -66,42 +67,56 @@ SOLVER_SPECS: dict[str, dict[str, object]] = {
         "extra_overrides": [],
     },
     "mm": {
-        "max_steps": 2048,
-        "batch_size": 1024,
+        "max_steps": 4096,
+        "batch_size": 2048,
         "steps_per_epoch": 128,
         "extra_overrides": [
-            "solver.forward_lr=1e-3",
-            "solver.inverse_lr=1e-3",
-            "solver.inner_steps=15",
+            "training.gradient_clip_norm=0.5",
+            "solver.forward_lr=5e-4",
+            "solver.inverse_lr=5e-4",
+            "solver.inner_steps=10",
+            "solver.identity_pretrain_batch_size=2048",
         ],
     },
     "mmv2": {
-        "max_steps": 2048,
+        "max_steps": 4096,
         "batch_size": 1024,
         "steps_per_epoch": 128,
         "extra_overrides": [
+            "training.gradient_clip_norm=0.5",
             "solver.forward_lr=1e-3",
             "solver.inverse_lr=1e-3",
             "solver.inner_steps=15",
+            "solver.identity_pretrain_batch_size=2048",
         ],
     },
+    "otp": {
+        "max_steps": 1024,
+        "batch_size": 512,
+        "steps_per_epoch": 64,
+        "extra_overrides": [],
+    },
     "tw2": {
-        "max_steps": 2048,
-        "batch_size": 1024,
+        "max_steps": 10000,
+        "batch_size": 512,
         "steps_per_epoch": 128,
         "extra_overrides": [],
     },
     "mm_b": {
-        "max_steps": 2048,
-        "batch_size": 1024,
+        "max_steps": 10000,
+        "batch_size": 2048,
         "steps_per_epoch": 128,
         "extra_overrides": [],
     },
     "qc": {
-        "max_steps": 2048,
-        "batch_size": 64,
-        "steps_per_epoch": 128,
-        "extra_overrides": [],
+        "max_steps": 1024,
+        "batch_size": 512,
+        "steps_per_epoch": 64,
+        "extra_overrides": [
+            "solver.forward_lr=1e-4",
+            "solver.regularization_weight=128.0",
+            "solver.identity_pretrain_batch_size=2048",
+        ],
     },
 }
 METRIC_SPECS = {
@@ -115,6 +130,7 @@ LATEX_SOLVER_NAMES = {
     "gaussian": "Gaussian",
     "mm": "tMM",
     "mmv2": "tICNN",
+    "otp": "OTP",
     "tw2": "tW2",
     "mm_b": "tMM-B",
     "qc": "tQC",
@@ -154,6 +170,29 @@ def _resolve_device(value: str) -> torch.device:
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("Requested device 'cuda' but torch.cuda.is_available() is False.")
     return device
+
+
+def _parse_spec_overrides(value: str) -> dict[str, dict[str, object]]:
+    if not value.strip():
+        return {}
+    loaded = json.loads(value)
+    if not isinstance(loaded, dict):
+        raise ValueError("--spec-overrides must decode to a JSON object.")
+    overrides: dict[str, dict[str, object]] = {}
+    for solver_name, solver_override in loaded.items():
+        if solver_name not in SOLVER_SPECS:
+            raise ValueError(f"Unknown solver in --spec-overrides: '{solver_name}'")
+        if not isinstance(solver_override, dict):
+            raise ValueError(f"Override for solver '{solver_name}' must be a JSON object.")
+        overrides[solver_name] = dict(solver_override)
+    return overrides
+
+
+def _merge_solver_specs(spec_overrides: dict[str, dict[str, object]]) -> dict[str, dict[str, object]]:
+    merged = copy.deepcopy(SOLVER_SPECS)
+    for solver_name, solver_override in spec_overrides.items():
+        merged.setdefault(solver_name, {}).update(solver_override)
+    return merged
 
 
 def _run_one(
@@ -197,8 +236,8 @@ def _run_one(
         f"solver={solver}",
         "dataset=paper_mix3to10",
         f"training.device={device}",
-        "training.gradient_clip_norm=null",
-        "visualization.enabled=true",
+        "training.checkpointing.save_every_n_epochs=0",
+        "visualization.enabled=false",
         f"training.seed={seed}",
         f"training.max_steps={int(spec['max_steps'])}",
         "training.max_epochs=1000",
@@ -483,24 +522,27 @@ def main() -> None:
     parser.add_argument("--eval-items", type=int, default=4096)
     parser.add_argument("--visualization-items", type=int, default=512)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--spec-overrides", default="")
     parser.add_argument("--rerun", action="store_true")
     args = parser.parse_args()
 
     seeds = _parse_csv_ints(args.seeds)
     solvers = _parse_csv_strings(args.solvers)
     figure_solvers = _parse_csv_strings(args.figure_solvers)
+    solver_specs = _merge_solver_specs(_parse_spec_overrides(str(args.spec_overrides)))
     for solver in solvers:
-        if solver not in SOLVER_SPECS:
+        if solver not in solver_specs:
             raise ValueError(f"Unknown solver '{solver}'")
 
     output_root = _resolve_output_path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
+    training_device = _resolve_device(str(args.device)).type
 
     rows: list[dict[str, Any]] = []
     for solver in solvers:
         solver_output = output_root / solver
         solver_output.mkdir(parents=True, exist_ok=True)
-        spec = SOLVER_SPECS[solver]
+        spec = solver_specs[solver]
         for seed in seeds:
             run_dir = solver_output / f"{solver}_seed{seed}"
             rows.append(
@@ -512,7 +554,7 @@ def main() -> None:
                     cache_version=str(args.cache_version),
                     eval_items=int(args.eval_items),
                     spec=spec,
-                    device=str(args.device),
+                    device=training_device,
                     rerun=bool(args.rerun),
                 )
             )
@@ -522,7 +564,7 @@ def main() -> None:
     _prune_legacy_report_artifacts(figures_dir)
 
     representative_rows: dict[str, dict[str, Any]] = {}
-    report_device = _resolve_device(str(args.device))
+    report_device = torch.device(training_device)
     for solver in figure_solvers:
         if solver not in solvers:
             continue
@@ -537,7 +579,7 @@ def main() -> None:
             output_dir=solver_figure_dir,
             solver_name=solver,
             seed=int(row["seed"]),
-            spec=SOLVER_SPECS[solver],
+            spec=solver_specs[solver],
             cache_version=str(args.cache_version),
             device=report_device,
             eval_items=int(args.eval_items),
@@ -558,8 +600,9 @@ def main() -> None:
             "evaluation_max_items": int(args.eval_items),
             "visualization_max_items": int(args.visualization_items),
             "figure_solvers": figure_solvers,
+            "spec_overrides": _parse_spec_overrides(str(args.spec_overrides)),
         },
-        **{solver: SOLVER_SPECS[solver] for solver in solvers},
+        **{solver: solver_specs[solver] for solver in solvers},
     }
     (output_root / "run_specs.json").write_text(json.dumps(run_specs, indent=2), encoding="utf-8")
     (output_root / "seed_results.json").write_text(json.dumps(rows, indent=2), encoding="utf-8")
@@ -569,7 +612,7 @@ def main() -> None:
     _write_markdown(
         output_root / "seed_summary.md",
         summary=summary,
-        specs={solver: SOLVER_SPECS[solver] for solver in solvers},
+        specs={solver: solver_specs[solver] for solver in solvers},
         representative_rows=representative_rows,
         cache_version=str(args.cache_version),
     )

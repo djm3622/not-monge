@@ -7,6 +7,7 @@ import torch
 
 from src.datasets.celeba import DictVisionDataset, build_image_dataset_bundle
 from src.datasets.diffusion_latent import DiffusionLatentDataset, build_diffusion_latent_bundle
+from src.datasets.makkuva_2d import build_makkuva_2d_benchmark
 from src.datasets.synthetic_ot import TensorDictDataset, build_synthetic_ot_benchmark
 from src.utils.data import collect_loader_tensors, maybe_override_batch_size, split_tensor_dict
 
@@ -48,6 +49,31 @@ def test_synthetic_benchmark_dataloaders_have_expected_shapes(
         assert batch["source"].shape[-1] == 2
         assert batch["target"].shape == batch["source"].shape
         assert batch["ground_truth_map"].shape == batch["source"].shape
+
+
+def test_makkuva_benchmark_is_reproducible_and_unsupervised(
+    tiny_makkuva_checkerboard_config: dict[str, object],
+) -> None:
+    first = build_makkuva_2d_benchmark(copy.deepcopy(tiny_makkuva_checkerboard_config))
+    second = build_makkuva_2d_benchmark(copy.deepcopy(tiny_makkuva_checkerboard_config))
+    first_train, first_val, first_test = first.make_dataloaders()
+    second_train, second_val, second_test = second.make_dataloaders()
+
+    first_train_batch = next(iter(first_train))
+    second_train_batch = next(iter(second_train))
+    assert torch.allclose(first_train_batch["source"], second_train_batch["source"])
+    assert torch.allclose(first_train_batch["target"], second_train_batch["target"])
+
+    first_val_batch = next(iter(first_val))
+    second_val_batch = next(iter(second_val))
+    first_test_batch = next(iter(first_test))
+    second_test_batch = next(iter(second_test))
+    assert "ground_truth_map" not in first_train_batch
+    assert "ground_truth_map" not in first_val_batch
+    assert torch.allclose(first_val_batch["source"], second_val_batch["source"])
+    assert torch.allclose(first_test_batch["target"], second_test_batch["target"])
+    assert first_val_batch["source"].shape[-1] == 2
+    assert first_val_batch["target"].shape == first_val_batch["source"].shape
 
 
 def test_fake_image_dataset_bundle_returns_dict_samples(

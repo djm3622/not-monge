@@ -97,19 +97,20 @@ class BaseOTSolver(nn.Module, ABC):
         """Shared validation metrics for OT recovery."""
         transported = self.compute_map(batch["source"])
         metrics = {
-            "val/map_l2": float((transported - batch["ground_truth_map"]).pow(2).mean().sqrt().detach()),
             "val/pushforward_w2": float(quadratic_cost(transported, batch["target"]).mean().sqrt().detach()),
-            "val/l2_uvp_fwd": l2_unexplained_variance_percentage(
+        }
+        if "ground_truth_map" in batch:
+            metrics["val/map_l2"] = float((transported - batch["ground_truth_map"]).pow(2).mean().sqrt().detach())
+            metrics["val/l2_uvp_fwd"] = l2_unexplained_variance_percentage(
                 transported.detach(),
                 batch["ground_truth_map"].detach(),
                 batch["target"].detach(),
-            ),
-            "val/transport_cos_fwd": transport_cosine_similarity(
+            )
+            metrics["val/transport_cos_fwd"] = transport_cosine_similarity(
                 transported.detach(),
                 batch["ground_truth_map"].detach(),
                 batch["source"].detach(),
-            ),
-        }
+            )
         potential = self.compute_potential(batch["target"])
         if potential is not None:
             metrics["val/potential_mean"] = float(potential.mean().detach())

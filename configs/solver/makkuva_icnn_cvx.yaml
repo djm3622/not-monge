@@ -1,0 +1,23 @@
+name: makkuva_icnn_cvx
+f_potential:
+  kind: makkuva_icnn
+  hidden_dims: [64, 64, 64, 64]
+  activation: leaky_relu
+  negative_slope: 0.2
+  input_quadratic: 0.0
+  weights_init_std: 0.1
+g_potential:
+  kind: makkuva_icnn
+  hidden_dims: [64, 64, 64, 64]
+  activation: leaky_relu
+  negative_slope: 0.2
+  input_quadratic: 0.0
+  weights_init_std: 0.1
+lr: 1.0e-4
+beta1: 0.5
+beta2: 0.9
+weight_decay: 0.0
+inner_steps: 10
+lambda_cvx: 1.0
+f_project_convex: true
+g_project_convex: false

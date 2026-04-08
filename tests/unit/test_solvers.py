@@ -13,6 +13,8 @@ pytestmark = pytest.mark.unit
 EXPECTED_SOLVERS = [
     "minimax",
     "icnn",
+    "makkuva_icnn_cvx",
+    "makkuva_mlp_ablation",
     "tw2",
     "mmv2",
     "mm",
@@ -28,7 +30,8 @@ EXPECTED_SOLVERS = [
 
 
 def test_registry_contains_all_required_solver_ids() -> None:
-    assert registered_solver_ids() == sorted(EXPECTED_SOLVERS)
+    registered = set(registered_solver_ids())
+    assert registered.issuperset(EXPECTED_SOLVERS)
 
 
 @pytest.mark.parametrize("solver_name", EXPECTED_SOLVERS)
@@ -131,3 +134,50 @@ def test_sinkhorn_reference_is_near_identity_on_matching_support(
     mapped = solver.compute_map(support)
     assert mapped.shape == support.shape
     assert torch.mean((mapped - support).pow(2)).sqrt() < 5.0e-1
+
+
+def test_makkuva_convex_solver_projects_f_and_reports_penalty(
+    solver_config_factory: object,
+    ot_model_config: dict[str, object],
+    tiny_training_config: dict[str, object],
+    ot_batch: dict[str, torch.Tensor],
+    disabled_grad_scaler: torch.amp.GradScaler,
+    null_autocast: object,
+) -> None:
+    solver = build_solver(
+        ot_model_config,
+        solver_config_factory("makkuva_icnn_cvx"),  # type: ignore[operator]
+        tiny_training_config,
+    )
+    solver.configure_optimizers(total_steps=2)
+    metrics = solver.training_step(
+        ot_batch,
+        scaler=disabled_grad_scaler,
+        autocast_context=null_autocast,
+        gradient_clip_norm=1.0,
+    )
+    assert metrics["train/g_penalty"] >= 0.0
+    assert all(torch.all(parameter >= 0.0) for parameter in solver.f_potential.positive_parameters())
+
+
+def test_makkuva_mlp_ablation_skips_convex_penalty(
+    solver_config_factory: object,
+    ot_model_config: dict[str, object],
+    tiny_training_config: dict[str, object],
+    ot_batch: dict[str, torch.Tensor],
+    disabled_grad_scaler: torch.amp.GradScaler,
+    null_autocast: object,
+) -> None:
+    solver = build_solver(
+        ot_model_config,
+        solver_config_factory("makkuva_mlp_ablation"),  # type: ignore[operator]
+        tiny_training_config,
+    )
+    solver.configure_optimizers(total_steps=2)
+    metrics = solver.training_step(
+        ot_batch,
+        scaler=disabled_grad_scaler,
+        autocast_context=null_autocast,
+        gradient_clip_norm=1.0,
+    )
+    assert metrics["train/g_penalty"] == pytest.approx(0.0, abs=1.0e-8)

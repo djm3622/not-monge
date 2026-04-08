@@ -57,3 +57,35 @@ def test_c_concavity_pipeline_emits_convexity_metrics(
     assert "envelope_gap/mean" in metrics
     assert "convexity_violation/mean" in metrics
     assert "hessian/min_eig" in metrics
+
+
+def test_makkuva_unsupervised_pipeline_train_and_eval(
+    baseline_config_factory: object,
+    tiny_makkuva_checkerboard_config: dict[str, object],
+    tmp_output_dir: Path,
+) -> None:
+    train_root = tmp_output_dir / "makkuva"
+    config = baseline_config_factory(  # type: ignore[operator]
+        "makkuva_icnn_cvx",
+        output_dir="outputs/makkuva",
+        dataset_config=tiny_makkuva_checkerboard_config,
+    )
+    config["training"]["checkpointing"]["monitor"] = "val/pushforward_w2"
+    config["training"]["checkpointing"]["mode"] = "min"
+    result = train_baseline_run(config, output_root=train_root)
+    checkpoint_path = train_root / "checkpoints" / "best.pt"
+
+    assert result["solver_id"] == "makkuva_icnn_cvx"
+    assert result["metrics"]["map_l2"] is None
+    assert {"pushforward_w2", "mmd"} <= set(result["metrics"])
+    assert checkpoint_path.exists()
+
+    eval_root = tmp_output_dir / "makkuva_eval"
+    eval_result = eval_baseline_run(
+        config,
+        checkpoint_path=checkpoint_path,
+        output_root=eval_root,
+    )
+    assert eval_result["solver_id"] == "makkuva_icnn_cvx"
+    assert eval_result["metrics"]["map_l2"] is None
+    assert {"pushforward_w2", "mmd"} <= set(eval_result["metrics"])
