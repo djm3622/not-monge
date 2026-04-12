@@ -1,0 +1,24 @@
+name: maxcorr
+potential:
+  kind: denseicnn
+  hidden_dims: [128, 128, 64]
+  rank: 1
+  activation: celu
+  dropout: 0.0
+  strong_convexity: 1.0e-4
+  identity_quadratic: 0.0
+transport_steps: 20
+transport_lr: 3.0e-4
+potential_lr: 3.0e-4
+use_c_concave_parameterization: false
+transport_l2_weight: 0.05
+noise:
+  kind: additive_gaussian
+  sigma_start: 0.05
+  sigma_end: 0.0
+  update_every: 0
+optimizer:
+  betas: [0.0, 0.9]
+  weight_decay: 0.0
+gradient_clip_enabled: false
+compile: false

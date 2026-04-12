@@ -39,9 +39,9 @@ def make_noisy_potential_copy(
             noise = torch.randn(
                 parameter.shape,
                 generator=generator,
-                device=parameter.device,
+                device="cpu",
                 dtype=parameter.dtype,
-            )
+            ).to(device=parameter.device)
             parameter.add_(noise_scale * noise)
     return clone
 

@@ -1,4 +1,4 @@
-"""Modern OT baselines: OTP and flow-based OT."""
+"""Modern OT baselines: semi-dual, max-correlation, and flow-based OT."""
 
 from __future__ import annotations
 
@@ -51,6 +51,82 @@ def _rbf_mmd_loss(samples_a: torch.Tensor, samples_b: torch.Tensor) -> torch.Ten
     return xx + yy - 2.0 * xy
 
 
+def _identity_pretrain_transport(
+    module: torch.nn.Module,
+    *,
+    input_dim: int,
+    output_dim: int,
+    steps: int,
+    batch_size: int,
+    learning_rate: float,
+    blow: float,
+    tol: float,
+    seed: int,
+) -> None:
+    """Warm-start a transport network near the identity map when dimensions match."""
+    if steps <= 0 or input_dim != output_dim:
+        return
+    device = next(module.parameters()).device
+    optimizer = torch.optim.Adam(module.parameters(), lr=learning_rate, weight_decay=1.0e-10)
+    generator = torch.Generator().manual_seed(seed)
+    module.train(True)
+    for _ in range(steps):
+        batch = blow * torch.randn(batch_size, input_dim, generator=generator, dtype=torch.float32).to(device)
+        prediction = module(batch)
+        loss = F.mse_loss(prediction, batch)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+        if float(loss.detach()) < tol:
+            break
+
+
+def _vector_gradient_penalty(
+    potential_fn: Any,
+    real_samples: torch.Tensor,
+    fake_samples: torch.Tensor,
+    *,
+    coefficient: float,
+) -> torch.Tensor:
+    """WGAN-GP style penalty for vector-valued OT benchmarks."""
+    if coefficient <= 0.0:
+        return fake_samples.new_tensor(0.0)
+    alpha = torch.rand(real_samples.shape[0], 1, device=real_samples.device, dtype=real_samples.dtype)
+    interpolated = alpha * real_samples + (1.0 - alpha) * fake_samples
+    interpolated.requires_grad_(True)
+    values = potential_fn(interpolated)
+    assert values is not None
+    gradients = torch.autograd.grad(
+        outputs=values.sum(),
+        inputs=interpolated,
+        create_graph=True,
+        retain_graph=True,
+    )[0]
+    return coefficient * ((gradients.norm(2, dim=-1) - 1.0) ** 2).mean()
+
+
+def _vector_gradient_optimality(
+    potential_fn: Any,
+    fake_samples: torch.Tensor,
+    source_samples: torch.Tensor,
+    *,
+    coefficient: float,
+) -> torch.Tensor:
+    """OTM-style gradient optimality penalty matching average source features."""
+    if coefficient <= 0.0:
+        return fake_samples.new_tensor(0.0)
+    fake_eval = fake_samples.detach().requires_grad_(True)
+    values = potential_fn(fake_eval)
+    assert values is not None
+    gradients = torch.autograd.grad(
+        outputs=values.sum(),
+        inputs=fake_eval,
+        create_graph=True,
+        retain_graph=True,
+    )[0]
+    return coefficient * (gradients.mean(dim=0) - source_samples.mean(dim=0)).norm()
+
+
 class OTPMinimaxSolver(BaseOTSolver):
     """Paper-faithful OTP solver with a smoothed source measure."""
 
@@ -87,6 +163,7 @@ class OTPMinimaxSolver(BaseOTSolver):
         )
         self.potential_lr = float(solver_config.get("potential_lr", training_config["optimizer"]["lr"]))
         self.transport_steps = int(solver_config.get("transport_steps", solver_config.get("inner_steps", 10)))
+        self.potential_steps = int(solver_config.get("potential_steps", 1))
 
         optimizer_cfg = dict(solver_config.get("optimizer", {}))
         betas = optimizer_cfg.get("betas", (0.0, 0.9))
@@ -96,6 +173,10 @@ class OTPMinimaxSolver(BaseOTSolver):
 
         self.use_c_concave_parameterization = bool(solver_config.get("use_c_concave_parameterization", True))
         self.quadratic_scale = float(solver_config.get("quadratic_scale", 0.5))
+        self.plan_weight = float(solver_config.get("plan_weight", 0.0))
+        self.plan_reg = float(solver_config.get("plan_reg", 1.0))
+        self.plan_warmup_steps = int(solver_config.get("plan_warmup_steps", 0))
+        self.plan_only_warmup_steps = int(solver_config.get("plan_only_warmup_steps", 0))
 
         noise_cfg = dict(solver_config.get("noise", solver_config.get("smoothing", {})))
         self.noise_kind = str(noise_cfg.get("kind", "additive_gaussian")).lower()
@@ -104,6 +185,14 @@ class OTPMinimaxSolver(BaseOTSolver):
         self.noise_update_every = int(noise_cfg.get("update_every", 0))
         self.noise_anneal_steps = int(noise_cfg.get("anneal_steps", 0))
 
+        self.transport_identity_pretrain_steps = int(solver_config.get("transport_identity_pretrain_steps", 0))
+        self.transport_identity_pretrain_batch_size = int(solver_config.get("transport_identity_pretrain_batch_size", 2048))
+        self.transport_identity_pretrain_lr = float(solver_config.get("transport_identity_pretrain_lr", 1.0e-3))
+        self.transport_identity_pretrain_blow = float(solver_config.get("transport_identity_pretrain_blow", 3.0))
+        self.transport_identity_pretrain_tol = float(solver_config.get("transport_identity_pretrain_tol", 1.0e-3))
+        self._transport_identity_pretrained = False
+        self._input_dim = input_dim
+        self._output_dim = output_dim
         self.train_step_index = 0
         self._total_steps = 1
 
@@ -140,14 +229,43 @@ class OTPMinimaxSolver(BaseOTSolver):
             return math.sqrt(max(1.0 - level, 0.0)) * source + math.sqrt(level) * noise
         return source + level * noise
 
+    def _maybe_plan_targets(
+        self,
+        source: torch.Tensor,
+        target: torch.Tensor,
+    ) -> torch.Tensor | None:
+        if self.plan_weight <= 0.0:
+            return None
+        if self.plan_warmup_steps > 0 and self.train_step_index >= self.plan_warmup_steps:
+            return None
+        plan = _sinkhorn_plan(source, target, reg=self.plan_reg)
+        return _barycentric_projection(plan, target)
+
     def compute_map(self, x: torch.Tensor) -> torch.Tensor:
         return self.transport(x)
 
     def compute_potential(self, x: torch.Tensor) -> torch.Tensor | None:
         return self._dual_potential(x)
 
+    def _maybe_identity_pretrain_transport(self) -> None:
+        if self._transport_identity_pretrained or self.transport_identity_pretrain_steps <= 0:
+            return
+        _identity_pretrain_transport(
+            self.transport,
+            input_dim=self._input_dim,
+            output_dim=self._output_dim,
+            steps=self.transport_identity_pretrain_steps,
+            batch_size=self.transport_identity_pretrain_batch_size,
+            learning_rate=self.transport_identity_pretrain_lr,
+            blow=self.transport_identity_pretrain_blow,
+            tol=self.transport_identity_pretrain_tol,
+            seed=int(self.training_config.get("seed", 1234)) + 29,
+        )
+        self._transport_identity_pretrained = True
+
     def configure_optimizers(self, total_steps: int) -> None:
         self._total_steps = max(int(total_steps), 1)
+        self._maybe_identity_pretrain_transport()
         self.optimizers = [
             torch.optim.Adam(
                 self.transport.parameters(),
@@ -192,20 +310,314 @@ class OTPMinimaxSolver(BaseOTSolver):
         target = batch["target"]
 
         potential_optimizer = self.optimizers[1]
-        potential_optimizer.zero_grad(set_to_none=True)
-        with frozen_parameters(self.transport):
-            with autocast_context():
-                noised_source = self._perturb_source(batch["source"])
-                transported = self.transport(noised_source).detach()
-                potential_real = self._dual_potential(target)
-                potential_fake = self._dual_potential(transported)
-                potential_objective = potential_real.mean() - potential_fake.mean()
-                potential_loss = -potential_objective
-        scaler.scale(potential_loss).backward()
-        if self.gradient_clip_enabled and gradient_clip_norm is not None:
-            scaler.unscale_(potential_optimizer)
-            torch.nn.utils.clip_grad_norm_(self.potential_backbone.parameters(), gradient_clip_norm)
-        scaler.step(potential_optimizer)
+        potential_values: list[float] = []
+        for _ in range(self.potential_steps):
+            potential_optimizer.zero_grad(set_to_none=True)
+            with frozen_parameters(self.transport):
+                with autocast_context():
+                    noised_source = self._perturb_source(batch["source"])
+                    transported = self.transport(noised_source).detach()
+                    potential_real = self._dual_potential(target)
+                    potential_fake = self._dual_potential(transported)
+                    potential_objective = potential_real.mean() - potential_fake.mean()
+                    potential_loss = -potential_objective
+            scaler.scale(potential_loss).backward()
+            if self.gradient_clip_enabled and gradient_clip_norm is not None:
+                scaler.unscale_(potential_optimizer)
+                torch.nn.utils.clip_grad_norm_(self.potential_backbone.parameters(), gradient_clip_norm)
+            scaler.step(potential_optimizer)
+            potential_values.append(float(potential_objective.detach()))
+
+        map_optimizer = self.optimizers[0]
+        map_losses: list[float] = []
+        cost_values: list[float] = []
+        plan_penalties: list[float] = []
+        plan_targets = self._maybe_plan_targets(batch["source"], batch["target"])
+        for _ in range(self.transport_steps):
+            map_optimizer.zero_grad(set_to_none=True)
+            with frozen_parameters(self.potential_backbone):
+                with autocast_context():
+                    noised_source = self._perturb_source(batch["source"])
+                    transported = self.transport(noised_source)
+                    potential_fake = self._dual_potential(transported)
+                    cost = self._transport_cost(noised_source, transported).mean()
+                    plan_penalty = transported.new_tensor(0.0)
+                    if plan_targets is not None:
+                        plan_penalty = self.plan_weight * F.mse_loss(transported, plan_targets)
+                    if plan_targets is not None and self.train_step_index < self.plan_only_warmup_steps:
+                        map_loss = plan_penalty
+                    else:
+                        map_loss = cost - potential_fake.mean() + plan_penalty
+            scaler.scale(map_loss).backward()
+            if self.gradient_clip_enabled and gradient_clip_norm is not None:
+                scaler.unscale_(map_optimizer)
+                torch.nn.utils.clip_grad_norm_(self.transport.parameters(), gradient_clip_norm)
+            scaler.step(map_optimizer)
+            map_losses.append(float(map_loss.detach()))
+            cost_values.append(float(cost.detach()))
+            plan_penalties.append(float(plan_penalty.detach()))
+        scaler.update()
+        self.train_step_index += 1
+        predicted = self.compute_map(batch["source"])
+        target_map = batch.get("ground_truth_map", batch["target"])
+        return {
+            "train/map_loss": sum(map_losses) / max(len(map_losses), 1),
+            "train/cost": sum(cost_values) / max(len(cost_values), 1),
+            "train/plan_penalty": sum(plan_penalties) / max(len(plan_penalties), 1),
+            "train/map_l2": float((predicted.detach() - target_map.detach()).pow(2).mean().sqrt()),
+            "train/potential_objective": sum(potential_values) / max(len(potential_values), 1),
+            "train/noise_level": noise_level,
+        }
+
+
+class MaxCorrelationTransportSolver(OTPMinimaxSolver):
+    """Direct max-correlation solver with an independent map and convex potential."""
+
+    solver_name = "maxcorr"
+    solver_group = "learned_w2"
+
+    def __init__(
+        self,
+        map_config: Mapping[str, Any],
+        solver_config: Mapping[str, Any],
+        training_config: Mapping[str, Any],
+    ) -> None:
+        super().__init__(map_config, solver_config, training_config)
+        self.transport_l2_weight = float(solver_config.get("transport_l2_weight", 0.0))
+        self.dot_reward_scale = float(solver_config.get("dot_reward_scale", 1.0))
+
+    def training_step(
+        self,
+        batch: Mapping[str, torch.Tensor],
+        scaler: torch.amp.GradScaler,
+        autocast_context: Any,
+        gradient_clip_norm: float | None,
+    ) -> dict[str, float]:
+        noise_level = self.current_noise_level()
+        target = batch["target"]
+
+        potential_optimizer = self.optimizers[1]
+        potential_values: list[float] = []
+        for _ in range(self.potential_steps):
+            potential_optimizer.zero_grad(set_to_none=True)
+            with frozen_parameters(self.transport):
+                with autocast_context():
+                    noised_source = self._perturb_source(batch["source"])
+                    transported = self.transport(noised_source).detach()
+                    potential_real = self.compute_potential(target)
+                    potential_fake = self.compute_potential(transported)
+                    assert potential_real is not None
+                    assert potential_fake is not None
+                    potential_gap = potential_real.mean() - potential_fake.mean()
+                    potential_loss = potential_gap
+            scaler.scale(potential_loss).backward()
+            if self.gradient_clip_enabled and gradient_clip_norm is not None:
+                scaler.unscale_(potential_optimizer)
+                torch.nn.utils.clip_grad_norm_(self.potential_backbone.parameters(), gradient_clip_norm)
+            scaler.step(potential_optimizer)
+            potential_values.append(float(potential_gap.detach()))
+
+        map_optimizer = self.optimizers[0]
+        map_losses: list[float] = []
+        dot_rewards: list[float] = []
+        regularizer_values: list[float] = []
+        plan_penalties: list[float] = []
+        plan_targets = self._maybe_plan_targets(batch["source"], batch["target"])
+        for _ in range(self.transport_steps):
+            map_optimizer.zero_grad(set_to_none=True)
+            with frozen_parameters(self.potential_backbone):
+                with autocast_context():
+                    noised_source = self._perturb_source(batch["source"])
+                    transported = self.transport(noised_source)
+                    potential_fake = self.compute_potential(transported)
+                    assert potential_fake is not None
+                    dot_reward = self.dot_reward_scale * (noised_source * transported).sum(dim=-1).mean()
+                    regularizer = self.transport_l2_weight * quadratic_cost(noised_source, transported).mean()
+                    plan_penalty = transported.new_tensor(0.0)
+                    if plan_targets is not None:
+                        plan_penalty = self.plan_weight * F.mse_loss(transported, plan_targets)
+                    if plan_targets is not None and self.train_step_index < self.plan_only_warmup_steps:
+                        map_loss = plan_penalty + regularizer
+                    else:
+                        map_loss = potential_fake.mean() - dot_reward + regularizer + plan_penalty
+            scaler.scale(map_loss).backward()
+            if self.gradient_clip_enabled and gradient_clip_norm is not None:
+                scaler.unscale_(map_optimizer)
+                torch.nn.utils.clip_grad_norm_(self.transport.parameters(), gradient_clip_norm)
+            scaler.step(map_optimizer)
+            map_losses.append(float(map_loss.detach()))
+            dot_rewards.append(float(dot_reward.detach()))
+            regularizer_values.append(float(regularizer.detach()))
+            plan_penalties.append(float(plan_penalty.detach()))
+        scaler.update()
+        self.train_step_index += 1
+
+        predicted = self.compute_map(batch["source"])
+        target_map = batch.get("ground_truth_map", batch["target"])
+        return {
+            "train/map_loss": sum(map_losses) / max(len(map_losses), 1),
+            "train/dot_reward": sum(dot_rewards) / max(len(dot_rewards), 1),
+            "train/transport_l2_regularizer": sum(regularizer_values) / max(len(regularizer_values), 1),
+            "train/plan_penalty": sum(plan_penalties) / max(len(plan_penalties), 1),
+            "train/map_l2": float((predicted.detach() - target_map.detach()).pow(2).mean().sqrt()),
+            "train/potential_gap": sum(potential_values) / max(len(potential_values), 1),
+            "train/noise_level": noise_level,
+        }
+
+
+class OTMTransportSolver(MaxCorrelationTransportSolver):
+    """OTM / max-correlation solver with the published gradient optimality penalty."""
+
+    solver_name = "otm"
+
+    def __init__(
+        self,
+        map_config: Mapping[str, Any],
+        solver_config: Mapping[str, Any],
+        training_config: Mapping[str, Any],
+    ) -> None:
+        super().__init__(map_config, solver_config, training_config)
+        self.gradient_optimality_weight = float(solver_config.get("gradient_optimality_weight", 0.0))
+
+    def training_step(
+        self,
+        batch: Mapping[str, torch.Tensor],
+        scaler: torch.amp.GradScaler,
+        autocast_context: Any,
+        gradient_clip_norm: float | None,
+    ) -> dict[str, float]:
+        noise_level = self.current_noise_level()
+        target = batch["target"]
+
+        potential_optimizer = self.optimizers[1]
+        potential_values: list[float] = []
+        gradient_optimality_values: list[float] = []
+        for _ in range(self.potential_steps):
+            potential_optimizer.zero_grad(set_to_none=True)
+            with frozen_parameters(self.transport):
+                with autocast_context():
+                    noised_source = self._perturb_source(batch["source"])
+                    transported = self.transport(noised_source).detach()
+                    potential_real = self.compute_potential(target)
+                    potential_fake = self.compute_potential(transported)
+                    assert potential_real is not None
+                    assert potential_fake is not None
+                    potential_gap = potential_real.mean() - potential_fake.mean()
+                    go_penalty = _vector_gradient_optimality(
+                        self.compute_potential,
+                        transported,
+                        noised_source.detach(),
+                        coefficient=self.gradient_optimality_weight,
+                    )
+                    potential_loss = potential_gap + go_penalty
+            scaler.scale(potential_loss).backward()
+            if self.gradient_clip_enabled and gradient_clip_norm is not None:
+                scaler.unscale_(potential_optimizer)
+                torch.nn.utils.clip_grad_norm_(self.potential_backbone.parameters(), gradient_clip_norm)
+            scaler.step(potential_optimizer)
+            potential_values.append(float(potential_gap.detach()))
+            gradient_optimality_values.append(float(go_penalty.detach()))
+
+        map_optimizer = self.optimizers[0]
+        map_losses: list[float] = []
+        dot_rewards: list[float] = []
+        regularizer_values: list[float] = []
+        for _ in range(self.transport_steps):
+            map_optimizer.zero_grad(set_to_none=True)
+            with frozen_parameters(self.potential_backbone):
+                with autocast_context():
+                    noised_source = self._perturb_source(batch["source"])
+                    transported = self.transport(noised_source)
+                    potential_fake = self.compute_potential(transported)
+                    assert potential_fake is not None
+                    dot_reward = self.dot_reward_scale * (noised_source * transported).sum(dim=-1).mean()
+                    regularizer = self.transport_l2_weight * quadratic_cost(noised_source, transported).mean()
+                    map_loss = potential_fake.mean() - dot_reward + regularizer
+            scaler.scale(map_loss).backward()
+            if self.gradient_clip_enabled and gradient_clip_norm is not None:
+                scaler.unscale_(map_optimizer)
+                torch.nn.utils.clip_grad_norm_(self.transport.parameters(), gradient_clip_norm)
+            scaler.step(map_optimizer)
+            map_losses.append(float(map_loss.detach()))
+            dot_rewards.append(float(dot_reward.detach()))
+            regularizer_values.append(float(regularizer.detach()))
+        scaler.update()
+        self.train_step_index += 1
+
+        predicted = self.compute_map(batch["source"])
+        target_map = batch.get("ground_truth_map", batch["target"])
+        return {
+            "train/map_loss": sum(map_losses) / max(len(map_losses), 1),
+            "train/dot_reward": sum(dot_rewards) / max(len(dot_rewards), 1),
+            "train/transport_l2_regularizer": sum(regularizer_values) / max(len(regularizer_values), 1),
+            "train/map_l2": float((predicted.detach() - target_map.detach()).pow(2).mean().sqrt()),
+            "train/potential_gap": sum(potential_values) / max(len(potential_values), 1),
+            "train/gradient_optimality_penalty": sum(gradient_optimality_values) / max(len(gradient_optimality_values), 1),
+            "train/noise_level": noise_level,
+        }
+
+
+class MongeMapSolver(OTPMinimaxSolver):
+    """Fan et al. style direct Monge-map solver with optional GP / GO penalties."""
+
+    solver_name = "monge_map"
+
+    def __init__(
+        self,
+        map_config: Mapping[str, Any],
+        solver_config: Mapping[str, Any],
+        training_config: Mapping[str, Any],
+    ) -> None:
+        super().__init__(map_config, solver_config, training_config)
+        self.gradient_penalty_weight = float(solver_config.get("gradient_penalty_weight", 0.0))
+        self.gradient_optimality_weight = float(solver_config.get("gradient_optimality_weight", 0.0))
+
+    def training_step(
+        self,
+        batch: Mapping[str, torch.Tensor],
+        scaler: torch.amp.GradScaler,
+        autocast_context: Any,
+        gradient_clip_norm: float | None,
+    ) -> dict[str, float]:
+        noise_level = self.current_noise_level()
+        target = batch["target"]
+
+        potential_optimizer = self.optimizers[1]
+        potential_values: list[float] = []
+        penalty_values: list[float] = []
+        for _ in range(self.potential_steps):
+            potential_optimizer.zero_grad(set_to_none=True)
+            with frozen_parameters(self.transport):
+                with autocast_context():
+                    noised_source = self._perturb_source(batch["source"])
+                    transported = self.transport(noised_source).detach()
+                    potential_real = self.compute_potential(target)
+                    potential_fake = self.compute_potential(transported)
+                    assert potential_real is not None
+                    assert potential_fake is not None
+                    potential_objective = potential_real.mean() - potential_fake.mean()
+                    if self.gradient_optimality_weight > 0.0:
+                        penalty = _vector_gradient_optimality(
+                            self.compute_potential,
+                            transported,
+                            noised_source.detach(),
+                            coefficient=self.gradient_optimality_weight,
+                        )
+                    else:
+                        penalty = _vector_gradient_penalty(
+                            self.compute_potential,
+                            target.detach(),
+                            transported,
+                            coefficient=self.gradient_penalty_weight,
+                        )
+                    potential_loss = -potential_objective + penalty
+            scaler.scale(potential_loss).backward()
+            if self.gradient_clip_enabled and gradient_clip_norm is not None:
+                scaler.unscale_(potential_optimizer)
+                torch.nn.utils.clip_grad_norm_(self.potential_backbone.parameters(), gradient_clip_norm)
+            scaler.step(potential_optimizer)
+            potential_values.append(float(potential_objective.detach()))
+            penalty_values.append(float(penalty.detach()))
 
         map_optimizer = self.optimizers[0]
         map_losses: list[float] = []
@@ -216,7 +628,8 @@ class OTPMinimaxSolver(BaseOTSolver):
                 with autocast_context():
                     noised_source = self._perturb_source(batch["source"])
                     transported = self.transport(noised_source)
-                    potential_fake = self._dual_potential(transported)
+                    potential_fake = self.compute_potential(transported)
+                    assert potential_fake is not None
                     cost = self._transport_cost(noised_source, transported).mean()
                     map_loss = cost - potential_fake.mean()
             scaler.scale(map_loss).backward()
@@ -228,13 +641,15 @@ class OTPMinimaxSolver(BaseOTSolver):
             cost_values.append(float(cost.detach()))
         scaler.update()
         self.train_step_index += 1
+
         predicted = self.compute_map(batch["source"])
         target_map = batch.get("ground_truth_map", batch["target"])
         return {
             "train/map_loss": sum(map_losses) / max(len(map_losses), 1),
             "train/cost": sum(cost_values) / max(len(cost_values), 1),
             "train/map_l2": float((predicted.detach() - target_map.detach()).pow(2).mean().sqrt()),
-            "train/potential_objective": float(potential_objective.detach()),
+            "train/potential_objective": sum(potential_values) / max(len(potential_values), 1),
+            "train/potential_penalty": sum(penalty_values) / max(len(penalty_values), 1),
             "train/noise_level": noise_level,
         }
 
@@ -374,6 +789,33 @@ def _build_otp_solver(
     training_config: Mapping[str, Any],
 ) -> OTPMinimaxSolver:
     return OTPMinimaxSolver(model_config, solver_config, training_config)
+
+
+@register_solver("maxcorr")
+def _build_maxcorr_solver(
+    model_config: Mapping[str, Any],
+    solver_config: Mapping[str, Any],
+    training_config: Mapping[str, Any],
+) -> MaxCorrelationTransportSolver:
+    return MaxCorrelationTransportSolver(model_config, solver_config, training_config)
+
+
+@register_solver("otm")
+def _build_otm_solver(
+    model_config: Mapping[str, Any],
+    solver_config: Mapping[str, Any],
+    training_config: Mapping[str, Any],
+) -> OTMTransportSolver:
+    return OTMTransportSolver(model_config, solver_config, training_config)
+
+
+@register_solver("monge_map")
+def _build_monge_map_solver(
+    model_config: Mapping[str, Any],
+    solver_config: Mapping[str, Any],
+    training_config: Mapping[str, Any],
+) -> MongeMapSolver:
+    return MongeMapSolver(model_config, solver_config, training_config)
 
 
 @register_solver("flow")

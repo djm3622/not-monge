@@ -49,10 +49,14 @@ class OTMapNetwork(nn.Module):
         dropout: float = 0.0,
         residual: bool = True,
         layer_norm: bool = False,
+        output_residual: bool = False,
+        zero_init_output: bool = False,
     ) -> None:
         super().__init__()
         if not hidden_dims:
             raise ValueError("hidden_dims must contain at least one entry")
+        if output_residual and input_dim != output_dim:
+            raise ValueError("output_residual requires matching input_dim and output_dim")
         first_hidden, *tail = list(hidden_dims)
         self.input = nn.Sequential(
             nn.Linear(input_dim, first_hidden),
@@ -72,11 +76,19 @@ class OTMapNetwork(nn.Module):
             in_dim = hidden_dim
         self.hidden = nn.Sequential(*blocks) if blocks else nn.Identity()
         self.output = nn.Linear(in_dim, output_dim)
+        self.output_residual = bool(output_residual)
+        if zero_init_output:
+            nn.init.zeros_(self.output.weight)
+            nn.init.zeros_(self.output.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x
         x = self.input(x)
         x = self.hidden(x)
-        return self.output(x)
+        output = self.output(x)
+        if self.output_residual:
+            output = output + residual
+        return output
 
 
 def build_ot_map(config: dict | Iterable[tuple[str, object]]) -> OTMapNetwork:
@@ -90,4 +102,6 @@ def build_ot_map(config: dict | Iterable[tuple[str, object]]) -> OTMapNetwork:
         dropout=float(cfg.get("dropout", 0.0)),
         residual=bool(cfg.get("residual", True)),
         layer_norm=bool(cfg.get("layer_norm", False)),
+        output_residual=bool(cfg.get("output_residual", False)),
+        zero_init_output=bool(cfg.get("zero_init_output", False)),
     )

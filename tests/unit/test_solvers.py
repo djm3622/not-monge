@@ -24,6 +24,9 @@ EXPECTED_SOLVERS = [
     "gaussian",
     "entropic",
     "otp",
+    "monge_map",
+    "otm",
+    "maxcorr",
     "flow",
     "w1",
 ]

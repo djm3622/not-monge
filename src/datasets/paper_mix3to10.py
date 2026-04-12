@@ -258,7 +258,12 @@ def _identity_pretrain(
     generator = torch.Generator().manual_seed(seed)
     module.train(True)
     for _ in range(steps):
-        batch = blow * torch.randn(batch_size, input_dim, generator=generator, dtype=torch.float32, device=device)
+        batch = blow * torch.randn(
+            batch_size,
+            input_dim,
+            generator=generator,
+            dtype=torch.float32,
+        ).to(device)
         batch.requires_grad_(True)
         prediction = _potential_gradient(module, batch, create_graph=True)
         loss = F.mse_loss(prediction, batch.detach())

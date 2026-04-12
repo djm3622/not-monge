@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -236,9 +237,19 @@ def train_baseline_run(config: Mapping[str, Any], output_root: str | Path) -> di
             output_dir=output_dir,
             full_config=config,
         )
-        trainer.fit(solver, train_loader, val_loader)
+        final_val_metrics = trainer.fit(solver, train_loader, val_loader)
         device = trainer.device
         checkpoint_dir = output_dir / str(config["training"]["checkpointing"]["dirpath"])
+        last_epoch = math.ceil(trainer.global_step / max(len(train_loader), 1))
+        save_checkpoint(
+            {
+                "epoch": int(last_epoch),
+                "global_step": int(trainer.global_step),
+                "task": solver.state_dict(),
+                "val_metrics": dict(final_val_metrics),
+            },
+            checkpoint_dir / "last.pt",
+        )
         best_checkpoint = checkpoint_dir / "best.pt"
         if best_checkpoint.exists():
             load_solver_checkpoint(solver, best_checkpoint)

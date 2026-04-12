@@ -8,7 +8,7 @@ from src.solvers.registry import build_solver
 pytestmark = pytest.mark.unit
 
 
-@pytest.mark.parametrize("solver_name", ["otp", "flow"])
+@pytest.mark.parametrize("solver_name", ["otp", "monge_map", "otm", "maxcorr", "flow"])
 def test_new_solvers_build_and_compute_map(
     solver_name: str,
     solver_config_factory: object,
@@ -80,6 +80,63 @@ def test_otp_backward_produces_finite_gradients(
     gradients = [parameter.grad for parameter in solver.parameters() if parameter.requires_grad and parameter.grad is not None]
     assert gradients
     assert all(torch.isfinite(gradient).all() for gradient in gradients)
+
+
+def test_maxcorr_compute_potential_and_training_metrics(
+    solver_config_factory: object,
+    ot_model_config: dict[str, object],
+    tiny_training_config: dict[str, object],
+    ot_batch: dict[str, torch.Tensor],
+    disabled_grad_scaler: torch.amp.GradScaler,
+    null_autocast: object,
+) -> None:
+    solver = build_solver(
+        ot_model_config,
+        solver_config_factory("maxcorr"),  # type: ignore[operator]
+        tiny_training_config,
+    )
+    solver.configure_optimizers(total_steps=8)
+    potential = solver.compute_potential(ot_batch["target"])
+    assert potential is not None
+    assert torch.isfinite(potential).all()
+    expected = solver.potential_backbone(ot_batch["target"])
+    assert torch.allclose(potential, expected)
+    metrics = solver.training_step(
+        ot_batch,
+        scaler=disabled_grad_scaler,
+        autocast_context=null_autocast,
+        gradient_clip_norm=None,
+    )
+    assert "train/dot_reward" in metrics
+    assert "train/potential_gap" in metrics
+    assert torch.isfinite(torch.tensor(metrics["train/dot_reward"]))
+
+
+@pytest.mark.parametrize("solver_name", ["otm", "monge_map"])
+def test_published_direct_map_variants_report_penalty_metrics(
+    solver_name: str,
+    solver_config_factory: object,
+    ot_model_config: dict[str, object],
+    tiny_training_config: dict[str, object],
+    ot_batch: dict[str, torch.Tensor],
+    disabled_grad_scaler: torch.amp.GradScaler,
+    null_autocast: object,
+) -> None:
+    solver = build_solver(
+        ot_model_config,
+        solver_config_factory(solver_name),  # type: ignore[operator]
+        tiny_training_config,
+    )
+    solver.configure_optimizers(total_steps=8)
+    metrics = solver.training_step(
+        ot_batch,
+        scaler=disabled_grad_scaler,
+        autocast_context=null_autocast,
+        gradient_clip_norm=None,
+    )
+    key = "train/gradient_optimality_penalty" if solver_name == "otm" else "train/potential_penalty"
+    assert key in metrics
+    assert torch.isfinite(torch.tensor(metrics[key]))
 
 
 def test_flow_forward_flow_and_integrate_flow(

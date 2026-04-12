@@ -19,7 +19,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.benchmarking import eval_baseline_run, train_baseline_run
+from src.benchmarking import eval_baseline_run, resolve_ot_dataset, train_baseline_run
+from src.diagnostics.case1_stability import run_case1_stability_diagnostic
+from src.utils.device import infer_device
 
 DEFAULT_SEEDS = [
     686499,
@@ -53,11 +55,14 @@ DEFAULT_SEEDS = [
     480217,
     389379,
 ]
-DEFAULT_SOLVERS = ["gaussian", "mm", "mmv2", "tw2", "mm_b", "qc"]
+DEFAULT_SOLVERS = ["gaussian", "mm", "mmv2", "tw2", "mm_b", "qc", "otp", "monge_map", "otm", "maxcorr", "makkuva_icnn_cvx"]
 DEFAULT_CACHE_VERSION = "paper_ref_d64_b256_s25k"
 DEFAULT_OUTPUT_ROOT = "outputs/paper_case1_suite"
 DEFAULT_VISUALIZATION_ITEMS = 512
 DEFAULT_SADDLE_EXAMPLES = 3
+DEFAULT_STABILITY_CHECKPOINTS = 5
+DEFAULT_STABILITY_ITEMS = 512
+DEFAULT_STABILITY_NOISE_SCALE = 1.0e-2
 
 SOLVER_SPECS: dict[str, dict[str, object]] = {
     "gaussian": {
@@ -91,8 +96,26 @@ SOLVER_SPECS: dict[str, dict[str, object]] = {
         ],
     },
     "otp": {
-        "max_steps": 1024,
-        "batch_size": 512,
+        "max_steps": 4096,
+        "batch_size": 256,
+        "steps_per_epoch": 64,
+        "extra_overrides": [
+            "solver.transport_steps=1",
+            "solver.transport_lr=5e-4",
+            "solver.potential_lr=5e-4",
+            "solver.noise.sigma_start=0.0",
+            "solver.noise.sigma_end=0.0",
+        ],
+    },
+    "monge_map": {
+        "max_steps": 4096,
+        "batch_size": 256,
+        "steps_per_epoch": 64,
+        "extra_overrides": [],
+    },
+    "otm": {
+        "max_steps": 4096,
+        "batch_size": 256,
         "steps_per_epoch": 64,
         "extra_overrides": [],
     },
@@ -118,22 +141,57 @@ SOLVER_SPECS: dict[str, dict[str, object]] = {
             "solver.identity_pretrain_batch_size=2048",
         ],
     },
+    "maxcorr": {
+        "max_steps": 4096,
+        "batch_size": 256,
+        "steps_per_epoch": 64,
+        "extra_overrides": [
+            "solver.transport_steps=1",
+            "solver.transport_lr=5e-4",
+            "solver.potential_lr=5e-4",
+            "solver.transport_l2_weight=0.05",
+            "solver.noise.sigma_start=0.0",
+            "solver.noise.sigma_end=0.0",
+        ],
+    },
+    "makkuva_icnn_cvx": {
+        "max_steps": 4096,
+        "batch_size": 256,
+        "steps_per_epoch": 64,
+        "extra_overrides": [
+            "solver.lr=5e-4",
+            "solver.inner_steps=4",
+        ],
+    },
 }
 SUMMARY_METRICS = ("map_l2", "l2_uvp", "transport_cos", "saddle_residual")
+STABILITY_SUMMARY_METRICS = (
+    "stability_best_potential_centered_rmse",
+    "stability_best_forward_flatness_std_F",
+)
 LATEX_SOLVER_NAMES = {
     "gaussian": "Gaussian",
     "mm": "tMM",
     "mmv2": "tMMv2",
     "otp": "OTP",
+    "monge_map": "MongeMap",
+    "otm": "OTM",
     "tw2": "tW2",
     "mm_b": "tMM-B",
     "qc": "tQC",
+    "maxcorr": "MaxCorr",
+    "makkuva_icnn_cvx": "Makkuva-ICNN",
 }
+CASE1_STABILITY_SOLVERS = {"mm", "mmv2", "tw2", "mm_b", "qc"}
 TABLE_COLUMNS = [
     ("map_l2", "Map L2 $\\downarrow$"),
     ("l2_uvp", "L2 UVP $\\downarrow$"),
     ("transport_cos", "Cosine Similarity $\\uparrow$"),
     ("saddle_residual", "Saddle Residual $\\downarrow$"),
+]
+STABILITY_TABLE_COLUMNS = [
+    ("stability_best_potential_centered_rmse", "Centered Potential RMSE $\\downarrow$"),
+    ("stability_best_forward_flatness_std_F", "Forward Flatness Std $\\downarrow$"),
 ]
 
 
@@ -172,6 +230,24 @@ def _resolve_device(value: str) -> torch.device:
     return device
 
 
+def _supports_case1_stability(solver: str) -> bool:
+    return solver in CASE1_STABILITY_SOLVERS
+
+
+def _stability_checkpoint_interval(
+    *,
+    max_steps: int,
+    steps_per_epoch: int,
+    num_checkpoints: int,
+) -> int:
+    if num_checkpoints <= 0:
+        return 0
+    epochs = max(1, math.ceil(max_steps / max(steps_per_epoch, 1)))
+    if epochs <= num_checkpoints:
+        return 1
+    return max(1, math.floor(epochs / num_checkpoints))
+
+
 def _parse_spec_overrides(value: str) -> dict[str, dict[str, object]]:
     if not value.strip():
         return {}
@@ -193,6 +269,24 @@ def _merge_solver_specs(spec_overrides: dict[str, dict[str, object]]) -> dict[st
     for solver_name, solver_override in spec_overrides.items():
         merged.setdefault(solver_name, {}).update(solver_override)
     return merged
+
+
+def _scale_solver_specs(
+    solver_specs: dict[str, dict[str, object]],
+    *,
+    budget_scale: float,
+) -> dict[str, dict[str, object]]:
+    if budget_scale <= 0.0:
+        raise ValueError("--budget-scale must be positive.")
+    scaled = copy.deepcopy(solver_specs)
+    if math.isclose(budget_scale, 1.0):
+        return scaled
+    for spec in scaled.values():
+        max_steps = int(spec.get("max_steps", 0))
+        if max_steps <= 1:
+            continue
+        spec["max_steps"] = max(1, int(math.ceil(max_steps * budget_scale)))
+    return scaled
 
 
 def _apply_override(config: dict[str, Any], override: str) -> None:
@@ -220,6 +314,7 @@ def _build_run_config(
     eval_items: int,
     visualization_items: int,
     saddle_examples: int,
+    stability_checkpoints: int,
     overrides: list[str],
 ) -> dict[str, Any]:
     model = OmegaConf.to_container(OmegaConf.load(ROOT / "configs/model/ot_map.yaml"), resolve=True)
@@ -259,7 +354,15 @@ def _build_run_config(
     config["training"]["device"] = device
     config["training"]["max_steps"] = int(spec["max_steps"])
     config["training"]["max_epochs"] = 1000
-    config["training"]["checkpointing"]["save_every_n_epochs"] = 0
+    config["training"]["checkpointing"]["save_every_n_epochs"] = (
+        _stability_checkpoint_interval(
+            max_steps=int(spec["max_steps"]),
+            steps_per_epoch=int(spec["steps_per_epoch"]),
+            num_checkpoints=stability_checkpoints,
+        )
+        if _supports_case1_stability(solver_name)
+        else 0
+    )
     config["training"]["checkpointing"]["monitor"] = "val/map_l2"
     config["training"]["checkpointing"]["mode"] = "min"
 
@@ -270,7 +373,25 @@ def _build_run_config(
     return config
 
 
-def _result_is_complete(result: dict[str, Any], *, saddle_examples: int) -> bool:
+def _stability_result_is_complete(metrics: Mapping[str, Any]) -> bool:
+    plot_path = metrics.get("stability_plot_path")
+    results_path = metrics.get("stability_results_path")
+    return (
+        metrics.get("stability_best_potential_centered_rmse") is not None
+        and metrics.get("stability_best_forward_flatness_std_F") is not None
+        and bool(plot_path)
+        and bool(results_path)
+        and Path(str(plot_path)).exists()
+        and Path(str(results_path)).exists()
+    )
+
+
+def _result_is_complete(
+    result: dict[str, Any],
+    *,
+    solver: str,
+    saddle_examples: int,
+) -> bool:
     metrics = result.get("metrics", {})
     if not isinstance(metrics, dict):
         return False
@@ -288,7 +409,11 @@ def _result_is_complete(result: dict[str, Any], *, saddle_examples: int) -> bool
         return False
     if len(sample_paths) < saddle_examples:
         return False
-    return all(Path(str(path)).exists() for path in sample_paths[:saddle_examples])
+    if not all(Path(str(path)).exists() for path in sample_paths[:saddle_examples]):
+        return False
+    if _supports_case1_stability(solver) and not _stability_result_is_complete(metrics):
+        return False
+    return True
 
 
 def _keep_best_checkpoint_only(run_dir: Path) -> None:
@@ -309,6 +434,9 @@ def _run_one(
     eval_items: int,
     visualization_items: int,
     saddle_examples: int,
+    stability_checkpoints: int,
+    stability_items: int,
+    stability_noise_scale: float,
     spec: dict[str, Any],
     device: str,
     rerun: bool,
@@ -325,6 +453,7 @@ def _run_one(
         eval_items=eval_items,
         visualization_items=visualization_items,
         saddle_examples=saddle_examples,
+        stability_checkpoints=stability_checkpoints,
         overrides=overrides,
     )
     result_path = output_dir / "results.json"
@@ -332,25 +461,79 @@ def _run_one(
 
     if result_path.exists() and not rerun:
         existing = json.loads(result_path.read_text(encoding="utf-8"))
-        if _result_is_complete(existing, saddle_examples=saddle_examples):
+        if _result_is_complete(existing, solver=solver, saddle_examples=saddle_examples):
             _keep_best_checkpoint_only(output_dir)
             return existing
         if checkpoint_path.exists():
             refreshed = eval_baseline_run(config, checkpoint_path=checkpoint_path, output_root=output_dir)
+            refreshed = _run_case1_stability(
+                result=refreshed,
+                solver=solver,
+                config=config,
+                output_dir=output_dir,
+                max_items=stability_items,
+                noise_scale=stability_noise_scale,
+            )
             _keep_best_checkpoint_only(output_dir)
             return refreshed
 
     result = train_baseline_run(config, output_root=output_dir)
+    result = _run_case1_stability(
+        result=result,
+        solver=solver,
+        config=config,
+        output_dir=output_dir,
+        max_items=stability_items,
+        noise_scale=stability_noise_scale,
+    )
     _keep_best_checkpoint_only(output_dir)
     return result
 
 
-def _aggregate(rows: list[dict[str, Any]]) -> dict[str, dict[str, tuple[float, float]]]:
+def _run_case1_stability(
+    *,
+    result: dict[str, Any],
+    solver: str,
+    config: Mapping[str, Any],
+    output_dir: Path,
+    max_items: int,
+    noise_scale: float,
+) -> dict[str, Any]:
+    if not _supports_case1_stability(solver):
+        return result
+
+    metrics = result.get("metrics", {})
+    if isinstance(metrics, dict) and _stability_result_is_complete(metrics):
+        return result
+
+    dataset_bundle = resolve_ot_dataset(config)
+    device = infer_device(str(config["training"].get("device", "auto")))
+    stability_metrics = run_case1_stability_diagnostic(
+        run_dir=output_dir,
+        config=config,
+        dataset_bundle=dataset_bundle,
+        device=device,
+        max_items=max_items,
+        noise_scale=noise_scale,
+        seed=int(config["training"]["seed"]),
+    )
+    updated = dict(result)
+    updated_metrics = dict(metrics) if isinstance(metrics, dict) else {}
+    updated_metrics.update(stability_metrics)
+    updated["metrics"] = updated_metrics
+    (output_dir / "results.json").write_text(json.dumps(updated, indent=2), encoding="utf-8")
+    return updated
+
+
+def _aggregate_named_metrics(
+    rows: list[dict[str, Any]],
+    metric_names: tuple[str, ...],
+) -> dict[str, dict[str, tuple[float, float]]]:
     grouped: dict[str, dict[str, list[float]]] = {}
     for row in rows:
         solver = str(row["solver_id"])
         grouped.setdefault(solver, {})
-        for metric in SUMMARY_METRICS:
+        for metric in metric_names:
             value = row["metrics"].get(metric)
             if value is None:
                 continue
@@ -362,6 +545,10 @@ def _aggregate(rows: list[dict[str, Any]]) -> dict[str, dict[str, tuple[float, f
         for metric, values in metrics.items():
             summary[solver][metric] = (mean(values), pstdev(values) if len(values) > 1 else 0.0)
     return summary
+
+
+def _aggregate(rows: list[dict[str, Any]]) -> dict[str, dict[str, tuple[float, float]]]:
+    return _aggregate_named_metrics(rows, SUMMARY_METRICS)
 
 
 def _format_summary_value(values: tuple[float, float] | None, *, latex: bool) -> str:
@@ -515,6 +702,100 @@ def _write_markdown(
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _write_stability_latex_table(
+    path: Path,
+    *,
+    summary: dict[str, dict[str, tuple[float, float]]],
+    solvers: list[str],
+    seed_count: int,
+) -> None:
+    learned_solvers = [solver for solver in solvers if solver in summary]
+    rankings = {metric: _metric_ranks(summary, metric) for metric, _ in STABILITY_TABLE_COLUMNS}
+    lines = [
+        "\\begin{table*}[h]",
+        "\\centering",
+        "\\small",
+        "\\setlength{\\tabcolsep}{4pt}",
+        "\\begin{tabular}{l" + "c" * len(STABILITY_TABLE_COLUMNS) + "}",
+        "\\toprule",
+        "Solver & " + " & ".join(label for _, label in STABILITY_TABLE_COLUMNS) + " \\\\",
+        "\\midrule",
+    ]
+    for solver in learned_solvers:
+        display_name = LATEX_SOLVER_NAMES.get(solver, solver)
+        cells = [display_name]
+        solver_metrics = summary.get(solver, {})
+        for metric, _ in STABILITY_TABLE_COLUMNS:
+            text = _format_summary_value(solver_metrics.get(metric), latex=True)
+            best, second = rankings[metric]
+            if solver == best and text != "---":
+                text = f"\\textbf{{{text}}}"
+            elif solver == second and text != "---":
+                text = f"\\emph{{{text}}}"
+            cells.append(text)
+        lines.append(" & ".join(cells) + " \\\\")
+    lines.extend(
+        [
+            "\\bottomrule",
+            "\\end{tabular}",
+            f"\\caption{{Case-study-1 stability diagnostics averaged over {seed_count} runs.}}",
+            "\\label{tab:case1_stability_results}",
+            "\\end{table*}",
+            "",
+        ]
+    )
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _write_stability_markdown(
+    path: Path,
+    *,
+    summary: dict[str, dict[str, tuple[float, float]]],
+    solvers: list[str],
+    representative_rows: dict[str, dict[str, Any]],
+    seed_count: int,
+) -> None:
+    learned_solvers = [solver for solver in solvers if solver in summary]
+    lines = [
+        "# Case Study 1 Stability",
+        "",
+        "These metrics are computed from the best checkpoint for each run, using the fixed-map",
+        "forward-potential objective over saved checkpoints plus `last.pt`.",
+        f"Average over `{seed_count}` seeds.",
+        "",
+        "| Solver | centered_potential_rmse | forward_flatness_std |",
+        "| --- | --- | --- |",
+    ]
+    for solver in learned_solvers:
+        display_name = LATEX_SOLVER_NAMES.get(solver, solver)
+        metrics = summary.get(solver, {})
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    display_name,
+                    _format_summary_value(metrics.get("stability_best_potential_centered_rmse"), latex=False),
+                    _format_summary_value(metrics.get("stability_best_forward_flatness_std_F"), latex=False),
+                ]
+            )
+            + " |"
+        )
+
+    if representative_rows:
+        lines.extend(["", "Representative stability plots", ""])
+        for solver in learned_solvers:
+            row = representative_rows.get(solver)
+            if row is None:
+                continue
+            plot_path = row.get("metrics", {}).get("stability_plot_path")
+            if plot_path:
+                lines.append(
+                    f"- `{LATEX_SOLVER_NAMES.get(solver, solver)}` seed `{row['seed']}` stability: `{plot_path}`"
+                )
+
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the case study 1 paper suite.")
     parser.add_argument("--seeds", default=os.environ.get("SEEDS", ",".join(str(seed) for seed in DEFAULT_SEEDS)))
@@ -532,7 +813,23 @@ def main() -> None:
         type=int,
         default=int(os.environ.get("SADDLE_EXAMPLES", str(DEFAULT_SADDLE_EXAMPLES))),
     )
+    parser.add_argument(
+        "--stability-checkpoints",
+        type=int,
+        default=int(os.environ.get("STABILITY_CHECKPOINTS", str(DEFAULT_STABILITY_CHECKPOINTS))),
+    )
+    parser.add_argument(
+        "--stability-items",
+        type=int,
+        default=int(os.environ.get("STABILITY_ITEMS", str(DEFAULT_STABILITY_ITEMS))),
+    )
+    parser.add_argument(
+        "--stability-noise-scale",
+        type=float,
+        default=float(os.environ.get("STABILITY_NOISE_SCALE", str(DEFAULT_STABILITY_NOISE_SCALE))),
+    )
     parser.add_argument("--device", default=os.environ.get("TRAIN_DEVICE", "auto"))
+    parser.add_argument("--budget-scale", type=float, default=float(os.environ.get("BUDGET_SCALE", "1.0")))
     parser.add_argument("--spec-overrides", default=os.environ.get("SPEC_OVERRIDES", ""))
     parser.add_argument("--rerun", action="store_true", default=_env_flag("RERUN", False))
     parser.add_argument("--override", action="append", default=[], help="Additional config override applied to every run.")
@@ -540,7 +837,10 @@ def main() -> None:
 
     seeds = _parse_csv_ints(args.seeds)
     solvers = _parse_csv_strings(args.solvers)
-    solver_specs = _merge_solver_specs(_parse_spec_overrides(str(args.spec_overrides)))
+    solver_specs = _scale_solver_specs(
+        _merge_solver_specs(_parse_spec_overrides(str(args.spec_overrides))),
+        budget_scale=float(args.budget_scale),
+    )
     for solver in solvers:
         if solver not in solver_specs:
             raise ValueError(f"Unknown solver '{solver}'")
@@ -565,6 +865,9 @@ def main() -> None:
                     eval_items=int(args.eval_items),
                     visualization_items=int(args.visualization_items),
                     saddle_examples=int(args.saddle_examples),
+                    stability_checkpoints=int(args.stability_checkpoints),
+                    stability_items=int(args.stability_items),
+                    stability_noise_scale=float(args.stability_noise_scale),
                     spec=spec,
                     device=training_device,
                     rerun=bool(args.rerun),
@@ -573,6 +876,7 @@ def main() -> None:
             )
 
     summary = _aggregate(rows)
+    stability_summary = _aggregate_named_metrics(rows, STABILITY_SUMMARY_METRICS)
     representative_rows = {
         solver: row
         for solver in solvers
@@ -586,7 +890,11 @@ def main() -> None:
             "evaluation_max_items": int(args.eval_items),
             "visualization_max_items": int(args.visualization_items),
             "saddle_examples": int(args.saddle_examples),
+            "stability_checkpoints": int(args.stability_checkpoints),
+            "stability_items": int(args.stability_items),
+            "stability_noise_scale": float(args.stability_noise_scale),
             "device": training_device,
+            "budget_scale": float(args.budget_scale),
             "global_overrides": list(args.override),
             "spec_overrides": _parse_spec_overrides(str(args.spec_overrides)),
         },
@@ -595,6 +903,7 @@ def main() -> None:
     (output_root / "run_specs.json").write_text(json.dumps(run_specs, indent=2), encoding="utf-8")
     (output_root / "seed_results.json").write_text(json.dumps(rows, indent=2), encoding="utf-8")
     (output_root / "seed_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    (output_root / "stability_seed_summary.json").write_text(json.dumps(stability_summary, indent=2), encoding="utf-8")
     (output_root / "representative_runs.json").write_text(
         json.dumps(representative_rows, indent=2), encoding="utf-8"
     )
@@ -612,6 +921,19 @@ def main() -> None:
         seed_count=len(seeds),
         cache_version=str(args.cache_version),
         saddle_examples=int(args.saddle_examples),
+    )
+    _write_stability_latex_table(
+        output_root / "case1_stability_table.tex",
+        summary=stability_summary,
+        solvers=solvers,
+        seed_count=len(seeds),
+    )
+    _write_stability_markdown(
+        output_root / "stability_seed_summary.md",
+        summary=stability_summary,
+        solvers=solvers,
+        representative_rows=representative_rows,
+        seed_count=len(seeds),
     )
 
 

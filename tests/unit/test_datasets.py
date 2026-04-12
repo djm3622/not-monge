@@ -51,6 +51,26 @@ def test_synthetic_benchmark_dataloaders_have_expected_shapes(
         assert batch["ground_truth_map"].shape == batch["source"].shape
 
 
+def test_synthetic_train_loader_resamples_across_epochs(
+    synthetic_bundle: object,
+) -> None:
+    train_loader, _, _ = synthetic_bundle.make_dataloaders()
+    first_epoch_batch = next(iter(train_loader))
+    second_epoch_batch = next(iter(train_loader))
+    assert first_epoch_batch["source"].shape == second_epoch_batch["source"].shape
+    assert not torch.allclose(first_epoch_batch["source"], second_epoch_batch["source"])
+    assert not torch.allclose(first_epoch_batch["target"], second_epoch_batch["target"])
+
+
+def test_synthetic_benchmark_scales_target_rms_close_to_requested_multiplier(
+    synthetic_bundle: object,
+) -> None:
+    assert isinstance(synthetic_bundle, object)
+    ratio = synthetic_bundle.target_rms / synthetic_bundle.source_rms
+    assert ratio == pytest.approx(2.0, rel=0.3)
+    assert synthetic_bundle.potential_scale > 0.0
+
+
 def test_makkuva_benchmark_is_reproducible_and_unsupervised(
     tiny_makkuva_checkerboard_config: dict[str, object],
 ) -> None:

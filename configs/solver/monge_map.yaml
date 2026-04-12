@@ -1,0 +1,22 @@
+name: monge_map
+potential:
+  kind: mlp
+  hidden_dims: [256, 256, 256]
+  activation: silu
+transport_steps: 10
+potential_steps: 1
+transport_lr: 1.0e-4
+potential_lr: 1.0e-4
+quadratic_scale: 0.015625
+use_c_concave_parameterization: false
+gradient_penalty_weight: 0.0
+gradient_optimality_weight: 0.0
+noise:
+  kind: additive_gaussian
+  sigma_start: 0.0
+  sigma_end: 0.0
+optimizer:
+  betas: [0.5, 0.999]
+  weight_decay: 0.0
+gradient_clip_enabled: false
+compile: false
