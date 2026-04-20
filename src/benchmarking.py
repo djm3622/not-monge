@@ -28,8 +28,11 @@ from src.evaluation.ot_metrics import (
     transport_cosine_similarity,
 )
 from src.evaluation.visualization import save_ot_visualizations
+
+# once src.solvers are imported, the registry will be populated with all available solvers
 from src.solvers.base import BaseOTSolver
 from src.solvers.registry import build_solver
+
 from src.training.trainer import Trainer, mean_metrics, move_to_device
 from src.utils.checkpointing import save_checkpoint
 from src.utils.device import infer_device
@@ -227,7 +230,10 @@ def train_baseline_run(config: Mapping[str, Any], output_root: str | Path) -> di
     )
     dataset_bundle = resolve_ot_dataset(config)
     train_loader, val_loader, _ = dataset_bundle.make_dataloaders()
+
+    # 
     solver = build_solver(config["model"], config["solver"], config["training"])
+
     output_dir = Path(output_root)
     output_dir.mkdir(parents=True, exist_ok=True)
 

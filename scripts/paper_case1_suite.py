@@ -10,7 +10,7 @@ import os
 import sys
 from pathlib import Path
 from statistics import mean, pstdev
-from typing import Any
+from typing import Any, Mapping
 
 import torch
 from omegaconf import OmegaConf

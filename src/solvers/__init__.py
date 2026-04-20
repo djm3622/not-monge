@@ -1,4 +1,10 @@
-"""Optimization solvers."""
+"""
+Optimization solvers.
+
+Once one of the modules in this folder is imported, all of these solvers will be registered. 
+To add a new solver, simply add a new module and use the @register_solver decorator to register it.
+Finally add it here and you can grab it from the registry with build_solver.
+"""
 
 import src.solvers.advanced_baselines  # noqa: F401
 import src.solvers.benchmark_baselines  # noqa: F401

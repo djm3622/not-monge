@@ -1,4 +1,9 @@
-"""Shared utilities."""
+"""
+Shared utilities.
+
+All of the utilitizes are general purpose. 
+On first import of a utils, the remaining are imported for later use.
+"""
 
 from src.utils.checkpointing import save_checkpoint
 from src.utils.data import collect_loader_tensors, maybe_override_batch_size, split_tensor_dict

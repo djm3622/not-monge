@@ -177,9 +177,12 @@ class Trainer:
         val_loader: DataLoader[Mapping[str, torch.Tensor]] | None = None,
     ) -> dict[str, float]:
         seed_all(self.config.seed, deterministic=self.config.deterministic)
+
+        # moves the parameters in the solver to device
         task.to(self.device)
         if self.config.compile:
             task.compile_modules()
+            
         total_steps = self.config.max_steps or (self.config.max_epochs * len(train_loader))
         task.configure_optimizers(total_steps)
         final_val_metrics: dict[str, float] = {}
@@ -189,12 +192,16 @@ class Trainer:
             epoch_metrics: list[Mapping[str, float]] = []
             for batch in train_loader:
                 batch = move_to_device(batch, self.device)
+
+                # this calls the forward and backward passes, optimizer step, and scaler update
+                # all we get from is the the metrics from the batch
                 metrics = task.training_step(
                     batch=batch,
                     scaler=self.scaler,
                     autocast_context=lambda: make_autocast_context(self.device, self.precision),
                     gradient_clip_norm=self.config.gradient_clip_norm,
                 )
+
                 epoch_metrics.append(metrics)
                 self.global_step += 1
                 if self.global_step % self.config.log_every_n_steps == 0:
