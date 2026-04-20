@@ -1,0 +1,29 @@
+name: synthetic_ot_harder
+input_dim: 192
+n_train: 65536
+n_val: 8192
+n_test: 8192
+batch_size: 512
+steps_per_epoch: 128
+num_workers: 0
+source_distribution: gaussian_mixture
+source_scale: 1.0
+mixture_components: 24
+
+# Unequal mixture weights.
+mixture_weight_logits_std: 1.25
+
+# Anisotropic diagonal covariances per component.
+mixture_covariance_mode: anisotropic_diag
+mixture_covariance_log_std: 0.9
+
+generator_hidden_dims: [192, 192, 192, 192, 192]
+generator_rank: 16
+generator_init_std: 0.14
+strong_convexity: 0.05
+calibration_samples: 4096
+target_rms_multiplier: 1.0
+resample_train: true
+train_epoch_seed_stride: 1000003
+seed: 1234
+

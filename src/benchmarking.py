@@ -41,20 +41,21 @@ def resolve_ot_dataset(config: Mapping[str, Any]) -> Any:
     """Instantiate the requested OT dataset bundle."""
     training_cfg = dict(config["training"])
     dataset_cfg = dict(config["dataset"])
-    if dataset_cfg["name"] != "paper_mix3to10":
+    dataset_name = str(dataset_cfg["name"])
+    if dataset_name != "paper_mix3to10":
         fairness_batch_size = training_cfg.get("fairness", {}).get("batch_size")
         dataset_cfg = maybe_override_batch_size(dataset_cfg, fairness_batch_size)
-    if dataset_cfg["name"] == "synthetic_ot":
+    if dataset_name.startswith("synthetic_ot"):
         return build_synthetic_ot_benchmark(dataset_cfg)
-    if dataset_cfg["name"] == "makkuva_2d":
+    if dataset_name == "makkuva_2d":
         return build_makkuva_2d_benchmark(dataset_cfg)
-    if dataset_cfg["name"] == "paper_mix3to10":
+    if dataset_name == "paper_mix3to10":
         return build_paper_mix3to10_benchmark(dataset_cfg)
-    if dataset_cfg["name"] == "diffusion_latent":
+    if dataset_name == "diffusion_latent":
         return build_diffusion_latent_bundle(dataset_cfg)
-    if dataset_cfg["name"] in {"celeba", "cifar10", "fake_data"}:
+    if dataset_name in {"celeba", "cifar10", "fake_data"}:
         return build_image_dataset_bundle(dataset_cfg)
-    raise ValueError(f"Unsupported OT dataset: {dataset_cfg['name']}")
+    raise ValueError(f"Unsupported OT dataset: {dataset_name}")
 
 
 def load_solver_checkpoint(

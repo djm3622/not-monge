@@ -71,6 +71,30 @@ def test_synthetic_benchmark_scales_target_rms_close_to_requested_multiplier(
     assert synthetic_bundle.potential_scale > 0.0
 
 
+def test_synthetic_benchmark_supports_weighted_anisotropic_mixtures(
+    tiny_synthetic_ot_config: dict[str, object],
+) -> None:
+    config = copy.deepcopy(tiny_synthetic_ot_config)
+    config["source_distribution"] = "gaussian_mixture"
+    config["mixture_components"] = 3
+    config["mixture_weights"] = [0.7, 0.2, 0.1]
+    config["mixture_covariance_mode"] = "anisotropic_diag"
+    config["mixture_covariance_log_std"] = 0.6
+
+    bundle = build_synthetic_ot_benchmark(config)
+    sampler = bundle.train_loader.source_sampler
+
+    assert sampler.component_probs is not None
+    assert sampler.component_scales is not None
+    assert sampler.component_probs.shape == (3,)
+    assert torch.allclose(sampler.component_probs.sum(), torch.tensor(1.0), atol=1e-6)
+    assert sampler.component_scales.shape == (3, int(config["input_dim"]))
+    assert not torch.allclose(
+        sampler.component_scales,
+        torch.ones_like(sampler.component_scales),
+    )
+
+
 def test_makkuva_benchmark_is_reproducible_and_unsupervised(
     tiny_makkuva_checkerboard_config: dict[str, object],
 ) -> None:

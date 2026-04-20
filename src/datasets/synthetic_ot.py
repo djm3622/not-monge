@@ -39,6 +39,8 @@ class SyntheticSourceSampler:
     source_scale: float
     mixture_components: int
     component_means: torch.Tensor | None = None
+    component_probs: torch.Tensor | None = None
+    component_scales: torch.Tensor | None = None
 
     def sample(self, num_samples: int, generator: torch.Generator) -> torch.Tensor:
         if self.distribution == "gaussian":
@@ -47,8 +49,13 @@ class SyntheticSourceSampler:
             return self.source_scale * (2.0 * torch.rand(num_samples, self.input_dim, generator=generator) - 1.0)
         if self.component_means is None:
             raise ValueError("Mixture source sampler requires fixed component means")
-        assignments = torch.randint(self.mixture_components, (num_samples,), generator=generator)
+        if self.component_probs is None:
+            assignments = torch.randint(self.mixture_components, (num_samples,), generator=generator)
+        else:
+            assignments = torch.multinomial(self.component_probs, num_samples, replacement=True, generator=generator)
         noise = 0.35 * self.source_scale * torch.randn(num_samples, self.input_dim, generator=generator)
+        if self.component_scales is not None:
+            noise = noise * self.component_scales[assignments]
         return self.component_means[assignments] + noise
 
 
@@ -158,12 +165,39 @@ def build_source_sampler(config: Mapping[str, Any], rng: torch.Generator) -> Syn
         dim=-1,
         keepdim=True,
     ).clamp_min(1e-6)
+    component_probs: torch.Tensor | None = None
+    mixture_weights = config.get("mixture_weights")
+    if mixture_weights is not None:
+        component_probs = torch.as_tensor(mixture_weights, dtype=torch.float32)
+        if component_probs.numel() != mixture_components:
+            raise ValueError("mixture_weights must have length equal to mixture_components")
+        component_probs = component_probs / component_probs.sum().clamp_min(1e-12)
+    else:
+        logits_std = float(config.get("mixture_weight_logits_std", 0.0))
+        if logits_std > 0.0:
+            logits = logits_std * torch.randn(mixture_components, generator=rng)
+            component_probs = torch.softmax(logits, dim=0)
+
+    component_scales: torch.Tensor | None = None
+    covariance_mode = str(config.get("mixture_covariance_mode", "isotropic"))
+    covariance_log_std = float(config.get("mixture_covariance_log_std", 0.0))
+    if covariance_mode not in {"isotropic", "anisotropic_diag"}:
+        raise ValueError(f"Unsupported mixture_covariance_mode: {covariance_mode}")
+    if covariance_mode == "anisotropic_diag":
+        if covariance_log_std > 0.0:
+            log_scales = covariance_log_std * torch.randn(mixture_components, input_dim, generator=rng)
+            log_scales = log_scales - log_scales.mean(dim=-1, keepdim=True)
+            component_scales = torch.exp(log_scales)
+        else:
+            component_scales = torch.ones(mixture_components, input_dim)
     return SyntheticSourceSampler(
         input_dim=input_dim,
         distribution=distribution,
         source_scale=source_scale,
         mixture_components=mixture_components,
         component_means=component_means,
+        component_probs=component_probs,
+        component_scales=component_scales,
     )
 
 

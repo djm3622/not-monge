@@ -178,9 +178,11 @@ def _parse_spec_overrides(value: str) -> dict[str, dict[str, object]]:
 
 
 def _solver_specs_for_dataset(dataset_name: str) -> dict[str, dict[str, object]]:
-    if dataset_name not in DATASET_SOLVER_SPECS:
-        raise ValueError(f"Unsupported dataset '{dataset_name}'")
-    return DATASET_SOLVER_SPECS[dataset_name]
+    if dataset_name in DATASET_SOLVER_SPECS:
+        return DATASET_SOLVER_SPECS[dataset_name]
+    if dataset_name.startswith("synthetic_ot"):
+        return DATASET_SOLVER_SPECS["synthetic_ot"]
+    raise ValueError(f"Unsupported dataset '{dataset_name}'")
 
 
 def _merge_solver_specs(
@@ -217,9 +219,11 @@ def _resolve_output_path(value: str) -> Path:
 
 
 def _default_output_root(dataset_name: str) -> str:
-    if dataset_name not in DEFAULT_OUTPUT_ROOTS:
-        raise ValueError(f"Unsupported dataset '{dataset_name}'")
-    return DEFAULT_OUTPUT_ROOTS[dataset_name]
+    if dataset_name in DEFAULT_OUTPUT_ROOTS:
+        return DEFAULT_OUTPUT_ROOTS[dataset_name]
+    if dataset_name.startswith("synthetic_ot"):
+        return DEFAULT_OUTPUT_ROOTS["synthetic_ot"]
+    raise ValueError(f"Unsupported dataset '{dataset_name}'")
 
 
 def _resolve_device(value: str) -> torch.device:
