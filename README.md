@@ -4,7 +4,10 @@ Case study 1 compares the final paper solvers on the cached `paper_mix3to10` ben
 
 ## Setup
 
+Tested with Python 3.9.6 and pip 21.2.4. The package metadata supports Python 3.9 or newer.
+
 ```bash
+python3 -m pip install -r requirements.txt
 python3 -m pip install -e .
 ```
 
