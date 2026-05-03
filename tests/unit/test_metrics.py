@@ -16,6 +16,7 @@ from src.evaluation.generative_metrics import (
     precision_recall_from_features,
 )
 from src.evaluation.ot_metrics import (
+    empirical_kr_distance,
     empirical_w2_distance,
     gradient_error,
     map_l2_error,
@@ -29,6 +30,7 @@ def test_ot_metrics_are_zero_or_near_zero_for_matching_samples() -> None:
     samples = torch.randn(16, 2)
     assert torch.isclose(map_l2_error(samples, samples), torch.tensor(0.0))
     assert empirical_w2_distance(samples, samples) == pytest.approx(0.0, abs=1.0e-6)
+    assert empirical_kr_distance(samples, samples) == pytest.approx(0.0, abs=1.0e-6)
     assert maximum_mean_discrepancy(samples, samples) == pytest.approx(0.0, abs=1.0e-6)
 
 
@@ -36,6 +38,7 @@ def test_ot_metrics_are_positive_for_shifted_samples() -> None:
     samples = torch.randn(16, 2)
     shifted = samples + 2.0
     assert empirical_w2_distance(samples, shifted) > 0.1
+    assert empirical_kr_distance(samples, shifted) > 0.1
     assert maximum_mean_discrepancy(samples, shifted) > 0.0
 
 

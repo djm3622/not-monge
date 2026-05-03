@@ -19,6 +19,7 @@ from src.datasets.synthetic_ot import build_synthetic_ot_benchmark
 from src.evaluation.concavity_metrics import convexity_violation, envelope_gap, hessian_spectrum
 from src.evaluation.generative_metrics import frechet_inception_distance, precision_recall_from_features
 from src.evaluation.ot_metrics import (
+    empirical_kr_distance,
     empirical_w2_distance,
     gradient_error,
     l2_unexplained_variance_percentage,
@@ -115,6 +116,42 @@ def collect_ot_predictions(
     return result
 
 
+def _quadratic_transport_cost(source: torch.Tensor, transported: torch.Tensor) -> float:
+    return float((0.5 * (source - transported).pow(2).sum(dim=-1).mean()).detach())
+
+
+def _raw_dot_reward(source: torch.Tensor, transported: torch.Tensor) -> float:
+    return float(((source * transported).sum(dim=-1).mean()).detach())
+
+
+def _cost_equivalent_theorem_objective(
+    solver: BaseOTSolver,
+    source: torch.Tensor,
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+) -> tuple[float | None, float | None, float | None]:
+    """Return F, its cost-equivalent value, and raw dot reward on held-out samples."""
+    potential_prediction = solver.compute_potential(prediction)
+    potential_target = solver.compute_potential(target)
+    if potential_prediction is None or potential_target is None:
+        return None, None, _raw_dot_reward(source, prediction)
+
+    potential_gap = potential_target.view(-1).mean() - potential_prediction.view(-1).mean()
+    raw_dot = _raw_dot_reward(source, prediction)
+    solver_name = str(getattr(solver, "solver_name", "")).lower()
+    if solver_name in {"maxcorr", "otm"}:
+        dot_objective = raw_dot + float(potential_gap.detach())
+        constant = 0.5 * (
+            source.pow(2).sum(dim=-1).mean() + target.pow(2).sum(dim=-1).mean()
+        )
+        return dot_objective, float((constant - dot_objective).detach()), raw_dot
+
+    cost = 0.5 * (source - prediction).pow(2).sum(dim=-1).mean()
+    objective = cost + potential_gap
+    value = float(objective.detach())
+    return value, value, raw_dot
+
+
 def evaluate_ot_solver(
     solver: BaseOTSolver,
     dataset_bundle: Any,
@@ -126,12 +163,36 @@ def evaluate_ot_solver(
     _, _, test_loader = dataset_bundle.make_dataloaders()
     max_items = int(config.get("evaluation", {}).get("max_items", 2048))
     aggregated = collect_ot_predictions(solver, test_loader, device=device, max_items=max_items)
+    transport_cost = _quadratic_transport_cost(aggregated["source"], aggregated["prediction"])
+    optimal_cost = (
+        _quadratic_transport_cost(aggregated["source"], aggregated["ground_truth_map"])
+        if "ground_truth_map" in aggregated
+        else None
+    )
+    theorem_objective, theorem_cost_equivalent, dot_reward = _cost_equivalent_theorem_objective(
+        solver,
+        aggregated["source"].to(device),
+        aggregated["prediction"].to(device),
+        aggregated["target"].to(device),
+    )
+    dot_reward_scale = float(getattr(solver, "dot_reward_scale", 1.0))
     metrics: dict[str, Any] = {
         "map_l2": float(map_l2_error(aggregated["prediction"], aggregated["ground_truth_map"]).detach())
         if "ground_truth_map" in aggregated
         else None,
         "pushforward_w2": empirical_w2_distance(aggregated["prediction"], aggregated["target"]),
+        "d_kr": empirical_kr_distance(aggregated["prediction"], aggregated["target"]),
         "mmd": maximum_mean_discrepancy(aggregated["prediction"], aggregated["target"]),
+        "transport_cost": transport_cost,
+        "optimal_transport_cost": optimal_cost,
+        "transport_cost_gap": abs(transport_cost - optimal_cost) if optimal_cost is not None else None,
+        "theorem_objective": theorem_objective,
+        "theorem_cost_equivalent": theorem_cost_equivalent,
+        "theorem_gap": abs(theorem_cost_equivalent - optimal_cost)
+        if theorem_cost_equivalent is not None and optimal_cost is not None
+        else None,
+        "dot_reward": dot_reward,
+        "scaled_dot_reward": dot_reward_scale * dot_reward,
         "gradient_error": None,
         "l2_uvp": None,
         "transport_cos": None,

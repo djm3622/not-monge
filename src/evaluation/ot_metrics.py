@@ -60,6 +60,21 @@ def empirical_w2_distance(
     return float(np.sqrt(cost[row_ind, col_ind].mean()))
 
 
+def empirical_kr_distance(
+    predicted: torch.Tensor,
+    target: torch.Tensor,
+    max_samples: int = 1024,
+) -> float:
+    """Approximate Kantorovich-Rubinstein distance with empirical uniform W1."""
+    if predicted.shape[0] > max_samples:
+        indices = torch.randperm(predicted.shape[0], device=predicted.device)[:max_samples]
+        predicted = predicted[indices]
+        target = target[indices]
+    cost = torch.cdist(predicted, target).detach().cpu().numpy()
+    row_ind, col_ind = linear_sum_assignment(cost)
+    return float(cost[row_ind, col_ind].mean())
+
+
 def maximum_mean_discrepancy(
     samples_a: torch.Tensor,
     samples_b: torch.Tensor,
