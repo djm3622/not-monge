@@ -401,6 +401,16 @@ def build_result_record(
     if solver.supports_training and solver.optimizers:
         optimizer_name = solver.optimizers[0].__class__.__name__.lower()
         scheduler_name = solver.schedulers[0].__class__.__name__.lower() if solver.schedulers else "none"
+    metric_record = dict(metrics)
+    for metric_name, attribute_name in {
+        "solver_transport_steps": "transport_steps",
+        "solver_potential_steps": "potential_steps",
+        "solver_transport_lr": "transport_lr",
+        "solver_potential_lr": "potential_lr",
+    }.items():
+        value = getattr(solver, attribute_name, None)
+        if value is not None:
+            metric_record[metric_name] = int(value) if attribute_name.endswith("_steps") else float(value)
     return {
         "solver_id": solver.solver_name,
         "solver_group": solver.solver_group,
@@ -411,7 +421,7 @@ def build_result_record(
         "max_steps": int(config["training"].get("max_steps") or fairness.get("max_steps", 0)),
         "optimizer": optimizer_name,
         "scheduler": scheduler_name,
-        "metrics": dict(metrics),
+        "metrics": metric_record,
     }
 
 

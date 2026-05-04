@@ -29,6 +29,8 @@ DEFAULT_SEEDS = list(range(10))
 DEFAULT_SOLVERS = ["otp", "monge_map", "otm", "maxcorr"]
 DEFAULT_K_VALUES = [1, 2, 5, 10, 20]
 DEFAULT_RATIO_VALUES = [0.02, 0.05, 0.1, 0.25, 0.5, 1.0]
+FIXED_TRANSPORT_STEP_SOLVERS = {"monge_map", "otm", "maxcorr"}
+FIXED_TRANSPORT_STEPS = 1
 SUMMARY_METRICS = (
     "map_l2",
     "pushforward_w2",
@@ -82,6 +84,28 @@ def _run_max_steps(base_max_steps: int, k_value: int, budget_mode: str) -> int:
     return max(1, int(math.ceil(base_max_steps / max(k_value, 1))))
 
 
+def _sweep_k_values(solver_name: str, k_values: list[int]) -> list[int]:
+    if solver_name in FIXED_TRANSPORT_STEP_SOLVERS:
+        return [FIXED_TRANSPORT_STEPS]
+    return k_values
+
+
+def _effective_transport_steps(solver_name: str, k_value: int) -> int:
+    if solver_name in FIXED_TRANSPORT_STEP_SOLVERS:
+        return FIXED_TRANSPORT_STEPS
+    return int(k_value)
+
+
+def _effective_potential_lr(
+    *,
+    ratio_value: float,
+    transport_steps: int,
+    transport_lr: float,
+    potential_steps: int,
+) -> float:
+    return ratio_value * transport_steps * transport_lr / max(potential_steps, 1)
+
+
 def _build_grid_config(
     *,
     solver_name: str,
@@ -104,7 +128,13 @@ def _build_grid_config(
     save_epoch_checkpoints: bool,
     extra_overrides: list[str],
 ) -> dict[str, Any]:
-    potential_lr = ratio_value * k_value * transport_lr / max(potential_steps, 1)
+    transport_steps = _effective_transport_steps(solver_name, k_value)
+    potential_lr = _effective_potential_lr(
+        ratio_value=ratio_value,
+        transport_steps=transport_steps,
+        transport_lr=transport_lr,
+        potential_steps=potential_steps,
+    )
     spec = copy.deepcopy(base_spec)
     spec["max_steps"] = int(max_steps)
     if batch_size is not None:
@@ -113,7 +143,7 @@ def _build_grid_config(
         spec["steps_per_epoch"] = int(steps_per_epoch)
 
     grid_overrides = [
-        f"solver.transport_steps={int(k_value)}",
+        f"solver.transport_steps={int(transport_steps)}",
         f"solver.potential_steps={int(potential_steps)}",
         f"solver.transport_lr={float(transport_lr)}",
         f"solver.potential_lr={float(potential_lr)}",
@@ -138,10 +168,10 @@ def _build_grid_config(
         visualization_items=512,
         saddle_examples=0,
         diagnostic_checkpoints=1,
-        overrides=grid_overrides + extra_overrides,
+        overrides=extra_overrides + grid_overrides,
     )
     config["experiment"]["name"] = (
-        f"timescale_{dataset_name}_{solver_name}_k{k_value}_r{_slug_float(ratio_value)}_seed{seed}"
+        f"timescale_{dataset_name}_{solver_name}_k{transport_steps}_r{_slug_float(ratio_value)}_seed{seed}"
     )
     config["visualization"]["enabled"] = bool(visualize)
     config["training"]["fairness"]["batch_size"] = int(config["dataset"]["batch_size"])
@@ -161,13 +191,15 @@ def _flatten_result(
     potential_steps: int,
 ) -> dict[str, Any]:
     metrics = result.get("metrics", {})
+    transport_steps = _effective_transport_steps(str(result["solver_id"]), k_value)
     effective_ratio = potential_steps * float(metrics.get("configured_potential_lr", 0.0))
-    effective_ratio = effective_ratio / max(k_value * transport_lr, 1.0e-12)
+    effective_ratio = effective_ratio / max(transport_steps * transport_lr, 1.0e-12)
     row: dict[str, Any] = {
         "solver_id": result["solver_id"],
         "dataset_id": result["dataset_id"],
         "seed": result["seed"],
         "k": int(k_value),
+        "transport_steps": int(transport_steps),
         "ratio": float(ratio_value),
         "transport_lr": float(transport_lr),
         "potential_steps": int(potential_steps),
@@ -251,6 +283,42 @@ def _load_existing(path: Path) -> dict[str, Any] | None:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _close_float(left: Any, right: float, *, atol: float = 1.0e-12) -> bool:
+    try:
+        return math.isclose(float(left), float(right), rel_tol=0.0, abs_tol=atol)
+    except (TypeError, ValueError):
+        return False
+
+
+def _existing_matches_grid(
+    result: dict[str, Any],
+    *,
+    solver_name: str,
+    max_steps: int,
+    transport_steps: int,
+    potential_steps: int,
+    transport_lr: float,
+    potential_lr: float,
+    ratio_value: float,
+) -> bool:
+    metrics = result.get("metrics", {})
+    if not isinstance(metrics, dict):
+        return False
+    return (
+        str(result.get("solver_id")) == solver_name
+        and int(result.get("max_steps", -1)) == int(max_steps)
+        and int(metrics.get("solver_transport_steps", -1)) == int(transport_steps)
+        and int(metrics.get("solver_potential_steps", -1)) == int(potential_steps)
+        and _close_float(metrics.get("solver_transport_lr"), transport_lr)
+        and _close_float(metrics.get("solver_potential_lr"), potential_lr)
+        and int(metrics.get("configured_transport_steps", -1)) == int(transport_steps)
+        and int(metrics.get("configured_k", -1)) == int(transport_steps)
+        and _close_float(metrics.get("configured_transport_lr"), transport_lr)
+        and _close_float(metrics.get("configured_potential_lr"), potential_lr)
+        and _close_float(metrics.get("configured_ratio"), ratio_value)
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run K and dual/primal ratio grid sweeps.")
     parser.add_argument("--dataset", default="synthetic_ot")
@@ -291,9 +359,16 @@ def main() -> None:
     for solver_name in solvers:
         if solver_name not in base_specs:
             raise ValueError(f"Unknown solver '{solver_name}' for dataset '{dataset_name}'")
-        for k_value in k_values:
+        for k_value in _sweep_k_values(solver_name, k_values):
             for ratio_value in ratio_values:
-                run_max_steps = _run_max_steps(int(args.max_steps), k_value, str(args.budget_mode))
+                transport_steps = _effective_transport_steps(solver_name, k_value)
+                potential_lr = _effective_potential_lr(
+                    ratio_value=ratio_value,
+                    transport_steps=transport_steps,
+                    transport_lr=float(args.transport_lr),
+                    potential_steps=int(args.potential_steps),
+                )
+                run_max_steps = _run_max_steps(int(args.max_steps), transport_steps, str(args.budget_mode))
                 for seed in seeds:
                     run_dir = (
                         output_root
@@ -303,6 +378,17 @@ def main() -> None:
                     )
                     result_path = run_dir / "results.json"
                     existing = None if args.rerun else _load_existing(result_path)
+                    if existing is not None and not _existing_matches_grid(
+                        existing,
+                        solver_name=solver_name,
+                        max_steps=run_max_steps,
+                        transport_steps=transport_steps,
+                        potential_steps=int(args.potential_steps),
+                        transport_lr=float(args.transport_lr),
+                        potential_lr=potential_lr,
+                        ratio_value=float(ratio_value),
+                    ):
+                        existing = None
                     if existing is None:
                         config = _build_grid_config(
                             solver_name=solver_name,
@@ -332,15 +418,11 @@ def main() -> None:
                         result = existing
 
                     metrics = result.setdefault("metrics", {})
+                    metrics["configured_transport_steps"] = int(transport_steps)
                     metrics["configured_transport_lr"] = float(args.transport_lr)
-                    metrics["configured_potential_lr"] = (
-                        float(ratio_value)
-                        * int(k_value)
-                        * float(args.transport_lr)
-                        / max(int(args.potential_steps), 1)
-                    )
+                    metrics["configured_potential_lr"] = potential_lr
                     metrics["configured_potential_steps"] = int(args.potential_steps)
-                    metrics["configured_k"] = int(k_value)
+                    metrics["configured_k"] = int(transport_steps)
                     metrics["configured_ratio"] = float(ratio_value)
                     result_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
                     rows.append(
@@ -369,6 +451,8 @@ def main() -> None:
         "solvers": solvers,
         "seeds": seeds,
         "k_values": k_values,
+        "fixed_transport_step_solvers": sorted(FIXED_TRANSPORT_STEP_SOLVERS),
+        "fixed_transport_steps": FIXED_TRANSPORT_STEPS,
         "ratio_values": ratio_values,
         "transport_lr": float(args.transport_lr),
         "potential_steps": int(args.potential_steps),
