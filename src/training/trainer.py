@@ -212,7 +212,11 @@ class Trainer:
 
             if val_loader is not None and (epoch + 1) % self.config.validate_every_n_epochs == 0:
                 task.eval()
-                val_metrics = [task.validation_step(move_to_device(batch, self.device)) for batch in val_loader]
+                with torch.no_grad():
+                    val_metrics = [
+                        task.validation_step(move_to_device(batch, self.device))
+                        for batch in val_loader
+                    ]
                 final_val_metrics = mean_metrics(val_metrics)
                 self.logger.log_metrics(final_val_metrics, step=self.global_step)
                 self._save_epoch_checkpoint(task, epoch + 1, final_val_metrics)

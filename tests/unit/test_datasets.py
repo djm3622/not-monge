@@ -32,10 +32,26 @@ def test_synthetic_benchmark_is_reproducible(
 ) -> None:
     first = build_synthetic_ot_benchmark(copy.deepcopy(tiny_synthetic_ot_config))
     second = build_synthetic_ot_benchmark(copy.deepcopy(tiny_synthetic_ot_config))
+    first_train_batch = next(iter(first.train_loader))
+    second_train_batch = next(iter(second.train_loader))
     for key in ["source", "target", "ground_truth_map"]:
-        assert torch.allclose(first.train.tensors[key], second.train.tensors[key])
+        assert torch.allclose(first_train_batch[key], second_train_batch[key])
         assert torch.allclose(first.val.tensors[key], second.val.tensors[key])
         assert torch.allclose(first.test.tensors[key], second.test.tensors[key])
+    assert first.train is None
+
+
+def test_synthetic_benchmark_can_materialize_fixed_train_split(
+    tiny_synthetic_ot_config: dict[str, object],
+) -> None:
+    config = copy.deepcopy(tiny_synthetic_ot_config)
+    config["resample_train"] = False
+    first = build_synthetic_ot_benchmark(config)
+    second = build_synthetic_ot_benchmark(config)
+    assert first.train is not None
+    assert second.train is not None
+    for key in ["source", "target", "ground_truth_map"]:
+        assert torch.allclose(first.train.tensors[key], second.train.tensors[key])
 
 
 def test_synthetic_benchmark_dataloaders_have_expected_shapes(

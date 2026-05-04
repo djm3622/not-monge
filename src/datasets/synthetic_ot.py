@@ -63,7 +63,7 @@ class SyntheticSourceSampler:
 class SyntheticOTBenchmark:
     """Container for the synthetic OT benchmark splits and ground truth."""
 
-    train: TensorDictDataset
+    train: TensorDictDataset | None
     train_loader: Any
     val: TensorDictDataset
     test: TensorDictDataset
@@ -319,15 +319,20 @@ def build_synthetic_ot_benchmark(config: Mapping[str, Any]) -> SyntheticOTBenchm
     for parameter in scaled_potential.parameters():
         parameter.requires_grad_(False)
     target_rms = unscaled_target_rms * scale_factor if torch.isfinite(torch.tensor(unscaled_target_rms)) else math.nan
-    train_dataset = make_split(
-        potential=scaled_potential,
-        num_samples=int(cfg["n_train"]),
-        source_sampler=source_sampler,
-        rng=rng,
-    )
     batch_size = int(cfg.get("batch_size", 512))
     steps_per_epoch = int(cfg.get("steps_per_epoch", max(int(cfg["n_train"]) // max(batch_size, 1), 1)))
-    if bool(cfg.get("resample_train", True)):
+    resample_train = bool(cfg.get("resample_train", True))
+    train_dataset = (
+        None
+        if resample_train
+        else make_split(
+            potential=scaled_potential,
+            num_samples=int(cfg["n_train"]),
+            source_sampler=source_sampler,
+            rng=rng,
+        )
+    )
+    if resample_train:
         train_loader: Any = SyntheticResampledBatchLoader(
             potential=scaled_potential,
             source_sampler=source_sampler,
@@ -337,6 +342,7 @@ def build_synthetic_ot_benchmark(config: Mapping[str, Any]) -> SyntheticOTBenchm
             epoch_seed_stride=int(cfg.get("train_epoch_seed_stride", 1_000_003)),
         )
     else:
+        assert train_dataset is not None
         train_loader = DataLoader(
             train_dataset,
             batch_size=batch_size,

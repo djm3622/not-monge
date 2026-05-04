@@ -97,7 +97,8 @@ def collect_ot_predictions(
             current = min(current, remaining)
         source = batch["source"][:current]
         target = batch["target"][:current]
-        prediction = solver.compute_map(source)
+        with torch.no_grad():
+            prediction = solver.compute_map(source)
         sources.append(source.detach().cpu())
         predictions.append(prediction.detach().cpu())
         targets.append(target.detach().cpu())
@@ -202,9 +203,10 @@ def evaluate_ot_solver(
         "saddle_figure_path": None,
         "saddle_sample_paths": [],
     }
-    validation_metrics = mean_metrics(
-        [solver.validation_step(move_to_device(batch, device)) for batch in test_loader]
-    )
+    with torch.no_grad():
+        validation_metrics = mean_metrics(
+            [solver.validation_step(move_to_device(batch, device)) for batch in test_loader]
+        )
     if "val/w2_estimate" in validation_metrics:
         metrics["w2_estimate"] = float(validation_metrics["val/w2_estimate"])
     ground_truth_potential = getattr(dataset_bundle, "ground_truth_potential", None)

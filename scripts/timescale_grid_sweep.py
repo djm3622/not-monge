@@ -5,14 +5,23 @@ from __future__ import annotations
 import argparse
 import copy
 import csv
+import gc
 import json
 import math
+import os
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from statistics import mean, pstdev
 from typing import Any
 
+from omegaconf import OmegaConf
+
 ROOT = Path(__file__).resolve().parents[1]
+_MPLCONFIGDIR = Path(tempfile.gettempdir()) / "notmonge_matplotlib"
+_MPLCONFIGDIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("MPLCONFIGDIR", str(_MPLCONFIGDIR))
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -22,14 +31,12 @@ from scripts.paper_case1_formulation_suite import (  # noqa: E402
     _resolve_device,
     _solver_specs_for_dataset,
 )
-from src.benchmarking import train_baseline_run  # noqa: E402
-
 
 DEFAULT_SEEDS = list(range(10))
 DEFAULT_SOLVERS = ["otp", "monge_map", "otm", "maxcorr"]
 DEFAULT_K_VALUES = [1, 2, 5, 10, 20]
 DEFAULT_RATIO_VALUES = [0.02, 0.05, 0.1, 0.25, 0.5, 1.0]
-FIXED_TRANSPORT_STEP_SOLVERS = {"monge_map", "otm", "maxcorr"}
+FIXED_TRANSPORT_STEP_SOLVERS: set[str] = set()
 FIXED_TRANSPORT_STEPS = 1
 SUMMARY_METRICS = (
     "map_l2",
@@ -78,6 +85,93 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def _to_plain_config(config: dict[str, Any]) -> dict[str, Any]:
+    plain = OmegaConf.to_container(OmegaConf.create(config), resolve=True)
+    assert isinstance(plain, dict)
+    return plain
+
+
+def _purge_process_caches() -> None:
+    """Release Python objects and backend allocator caches after a run."""
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+        if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+            torch.mps.empty_cache()
+    except Exception:
+        # Cache cleanup is best-effort and must not hide the actual run result.
+        return
+
+
+def _run_training_in_process(config: dict[str, Any], run_dir: Path) -> dict[str, Any]:
+    """Run one grid component in the current process."""
+    from src.benchmarking import train_baseline_run
+
+    try:
+        return train_baseline_run(config, output_root=run_dir)
+    finally:
+        _purge_process_caches()
+
+
+def _run_training_subprocess(config: dict[str, Any], run_dir: Path) -> dict[str, Any]:
+    """Run one grid component in a short-lived child process.
+
+    Exiting the child releases model weights, datasets, autograd graphs, and
+    backend allocator arenas that a long-lived sweep process may otherwise keep.
+    """
+    run_dir.mkdir(parents=True, exist_ok=True)
+    result_path = run_dir / "results.json"
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        suffix=".json",
+        prefix="timescale_run_",
+        delete=False,
+    ) as handle:
+        json.dump(_to_plain_config(config), handle)
+        config_path = Path(handle.name)
+
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--run-config-json",
+                str(config_path),
+                "--run-output-dir",
+                str(run_dir),
+            ],
+            cwd=str(ROOT),
+            check=True,
+        )
+        if not result_path.exists():
+            raise FileNotFoundError(f"Expected child run to write {result_path}")
+        return json.loads(result_path.read_text(encoding="utf-8"))
+    finally:
+        config_path.unlink(missing_ok=True)
+        _purge_process_caches()
+
+
+def _run_single_config(config_path: Path, output_dir: Path) -> None:
+    """Child-process entry point for exactly one training run."""
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    _run_training_in_process(config, output_dir)
+
+
+def _prune_run_checkpoints(config: dict[str, Any], run_dir: Path) -> None:
+    checkpointing = config.get("training", {}).get("checkpointing", {})
+    checkpoint_dir = run_dir / str(checkpointing.get("dirpath", "checkpoints"))
+    if not checkpoint_dir.exists():
+        return
+    for checkpoint_path in checkpoint_dir.glob("*.pt"):
+        if checkpoint_path.name != "best.pt":
+            checkpoint_path.unlink(missing_ok=True)
+
+
 def _run_max_steps(base_max_steps: int, k_value: int, budget_mode: str) -> int:
     if budget_mode == "outer":
         return base_max_steps
@@ -99,11 +193,10 @@ def _effective_transport_steps(solver_name: str, k_value: int) -> int:
 def _effective_potential_lr(
     *,
     ratio_value: float,
-    transport_steps: int,
     transport_lr: float,
     potential_steps: int,
 ) -> float:
-    return ratio_value * transport_steps * transport_lr / max(potential_steps, 1)
+    return ratio_value * transport_lr / max(potential_steps, 1)
 
 
 def _build_grid_config(
@@ -131,7 +224,6 @@ def _build_grid_config(
     transport_steps = _effective_transport_steps(solver_name, k_value)
     potential_lr = _effective_potential_lr(
         ratio_value=ratio_value,
-        transport_steps=transport_steps,
         transport_lr=transport_lr,
         potential_steps=potential_steps,
     )
@@ -144,6 +236,7 @@ def _build_grid_config(
 
     grid_overrides = [
         f"solver.transport_steps={int(transport_steps)}",
+        f"solver.inner_steps={int(transport_steps)}",
         f"solver.potential_steps={int(potential_steps)}",
         f"solver.transport_lr={float(transport_lr)}",
         f"solver.potential_lr={float(potential_lr)}",
@@ -173,12 +266,14 @@ def _build_grid_config(
     config["experiment"]["name"] = (
         f"timescale_{dataset_name}_{solver_name}_k{transport_steps}_r{_slug_float(ratio_value)}_seed{seed}"
     )
+    if dataset_name.startswith("synthetic_ot"):
+        config["dataset"]["seed"] = int(seed)
     config["visualization"]["enabled"] = bool(visualize)
     config["training"]["fairness"]["batch_size"] = int(config["dataset"]["batch_size"])
     config["training"]["fairness"]["max_steps"] = int(config["training"]["max_steps"])
     if not save_epoch_checkpoints:
         config["training"]["checkpointing"]["save_every_n_epochs"] = 0
-    return config
+    return _to_plain_config(config)
 
 
 def _flatten_result(
@@ -193,7 +288,7 @@ def _flatten_result(
     metrics = result.get("metrics", {})
     transport_steps = _effective_transport_steps(str(result["solver_id"]), k_value)
     effective_ratio = potential_steps * float(metrics.get("configured_potential_lr", 0.0))
-    effective_ratio = effective_ratio / max(transport_steps * transport_lr, 1.0e-12)
+    effective_ratio = effective_ratio / max(transport_lr, 1.0e-12)
     row: dict[str, Any] = {
         "solver_id": result["solver_id"],
         "dataset_id": result["dataset_id"],
@@ -362,9 +457,19 @@ def main() -> None:
     parser.add_argument("--keep-config-noise", action="store_true")
     parser.add_argument("--visualize", action="store_true")
     parser.add_argument("--save-epoch-checkpoints", action="store_true")
+    parser.add_argument("--keep-checkpoints", action="store_true")
+    parser.add_argument("--no-isolate-runs", action="store_true")
     parser.add_argument("--rerun", action="store_true")
     parser.add_argument("--override", action="append", default=[])
+    parser.add_argument("--run-config-json", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--run-output-dir", default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    if args.run_config_json is not None:
+        if args.run_output_dir is None:
+            raise ValueError("--run-output-dir is required with --run-config-json")
+        _run_single_config(Path(str(args.run_config_json)), Path(str(args.run_output_dir)))
+        return
 
     dataset_name = str(args.dataset)
     solvers = _parse_csv_strings(str(args.solvers))
@@ -387,7 +492,6 @@ def main() -> None:
                 transport_steps = _effective_transport_steps(solver_name, k_value)
                 potential_lr = _effective_potential_lr(
                     ratio_value=ratio_value,
-                    transport_steps=transport_steps,
                     transport_lr=float(args.transport_lr),
                     potential_steps=int(args.potential_steps),
                 )
@@ -436,7 +540,10 @@ def main() -> None:
                             save_epoch_checkpoints=bool(args.save_epoch_checkpoints),
                             extra_overrides=list(args.override),
                         )
-                        result = train_baseline_run(config, output_root=run_dir)
+                        if bool(args.no_isolate_runs):
+                            result = _run_training_in_process(config, run_dir)
+                        else:
+                            result = _run_training_subprocess(config, run_dir)
                     else:
                         result = existing
 
@@ -448,6 +555,15 @@ def main() -> None:
                     metrics["configured_k"] = int(transport_steps)
                     metrics["configured_ratio"] = float(ratio_value)
                     result_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+                    if (
+                        existing is None
+                        and not bool(args.keep_checkpoints)
+                        and not bool(args.save_epoch_checkpoints)
+                    ):
+                        _prune_run_checkpoints(config, run_dir)
+                    if existing is None:
+                        del config
+                        _purge_process_caches()
                     rows.append(
                         _flatten_result(
                             result,
