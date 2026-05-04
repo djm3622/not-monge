@@ -168,3 +168,27 @@ def test_existing_grid_result_with_runtime_solver_steps_can_be_reused() -> None:
         potential_lr=1.0e-5,
         ratio_value=0.02,
     )
+
+
+def test_existing_otp_grid_result_without_runtime_solver_steps_can_be_reused() -> None:
+    legacy_result = {
+        "solver_id": "otp",
+        "max_steps": 8192,
+        "metrics": {
+            "configured_transport_lr": 5.0e-4,
+            "configured_potential_lr": 1.0e-4,
+            "configured_potential_steps": 1,
+            "configured_k": 2,
+            "configured_ratio": 0.1,
+        },
+    }
+    assert timescale_grid._existing_matches_grid(
+        legacy_result,
+        solver_name="otp",
+        max_steps=8192,
+        transport_steps=2,
+        potential_steps=1,
+        transport_lr=5.0e-4,
+        potential_lr=1.0e-4,
+        ratio_value=0.1,
+    )

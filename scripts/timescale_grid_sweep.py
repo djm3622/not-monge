@@ -304,15 +304,38 @@ def _existing_matches_grid(
     metrics = result.get("metrics", {})
     if not isinstance(metrics, dict):
         return False
+    if str(result.get("solver_id")) != solver_name or int(result.get("max_steps", -1)) != int(max_steps):
+        return False
+
+    runtime_keys = (
+        "solver_transport_steps",
+        "solver_potential_steps",
+        "solver_transport_lr",
+        "solver_potential_lr",
+    )
+    has_runtime_solver_config = all(key in metrics for key in runtime_keys)
+    if has_runtime_solver_config:
+        actual_solver_config_matches = (
+            int(metrics.get("solver_transport_steps", -1)) == int(transport_steps)
+            and int(metrics.get("solver_potential_steps", -1)) == int(potential_steps)
+            and _close_float(metrics.get("solver_transport_lr"), transport_lr)
+            and _close_float(metrics.get("solver_potential_lr"), potential_lr)
+        )
+    else:
+        # Older OTP sweeps did not persist runtime solver_* fields. Those runs are still
+        # reusable because OTP's configured K is the actual transport step count.
+        actual_solver_config_matches = solver_name not in FIXED_TRANSPORT_STEP_SOLVERS
+
+    configured_transport_steps = metrics.get("configured_transport_steps", metrics.get("configured_k"))
+    configured_potential_steps = metrics.get(
+        "configured_potential_steps",
+        metrics.get("solver_potential_steps", -1),
+    )
     return (
-        str(result.get("solver_id")) == solver_name
-        and int(result.get("max_steps", -1)) == int(max_steps)
-        and int(metrics.get("solver_transport_steps", -1)) == int(transport_steps)
-        and int(metrics.get("solver_potential_steps", -1)) == int(potential_steps)
-        and _close_float(metrics.get("solver_transport_lr"), transport_lr)
-        and _close_float(metrics.get("solver_potential_lr"), potential_lr)
-        and int(metrics.get("configured_transport_steps", -1)) == int(transport_steps)
+        actual_solver_config_matches
+        and int(configured_transport_steps) == int(transport_steps)
         and int(metrics.get("configured_k", -1)) == int(transport_steps)
+        and int(configured_potential_steps) == int(potential_steps)
         and _close_float(metrics.get("configured_transport_lr"), transport_lr)
         and _close_float(metrics.get("configured_potential_lr"), potential_lr)
         and _close_float(metrics.get("configured_ratio"), ratio_value)
