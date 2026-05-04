@@ -34,6 +34,18 @@ def test_case1_suite_defaults_include_published_direct_map_formulations() -> Non
     assert "monge_map" in case1_suite.SOLVER_SPECS
 
 
+def test_case1_suite_direct_map_solvers_pin_matched_timescale_overrides() -> None:
+    expected = {
+        "solver.transport_steps=1",
+        "solver.transport_lr=5e-4",
+        "solver.potential_lr=5e-4",
+        "solver.noise.sigma_start=0.0",
+        "solver.noise.sigma_end=0.0",
+    }
+    for solver in ["monge_map", "otm", "maxcorr"]:
+        assert expected.issubset(set(case1_suite.SOLVER_SPECS[solver]["extra_overrides"]))
+
+
 def test_case1_suite_table_names_match_requested_labels() -> None:
     assert case1_suite.LATEX_SOLVER_NAMES["mm"] == "tMM"
     assert case1_suite.LATEX_SOLVER_NAMES["mmv2"] == "tMMv2"

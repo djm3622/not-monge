@@ -111,13 +111,25 @@ SOLVER_SPECS: dict[str, dict[str, object]] = {
         "max_steps": 4096,
         "batch_size": 256,
         "steps_per_epoch": 64,
-        "extra_overrides": [],
+        "extra_overrides": [
+            "solver.transport_steps=1",
+            "solver.transport_lr=5e-4",
+            "solver.potential_lr=5e-4",
+            "solver.noise.sigma_start=0.0",
+            "solver.noise.sigma_end=0.0",
+        ],
     },
     "otm": {
         "max_steps": 4096,
         "batch_size": 256,
         "steps_per_epoch": 64,
-        "extra_overrides": [],
+        "extra_overrides": [
+            "solver.transport_steps=1",
+            "solver.transport_lr=5e-4",
+            "solver.potential_lr=5e-4",
+            "solver.noise.sigma_start=0.0",
+            "solver.noise.sigma_end=0.0",
+        ],
     },
     "tw2": {
         "max_steps": 10000,

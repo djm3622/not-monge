@@ -12,6 +12,19 @@ def test_formulation_suite_defaults_cover_published_direct_map_families() -> Non
     assert formulation_suite.SOLVER_SPECS["otm"]["max_steps"] == 4096
 
 
+def test_formulation_suite_direct_map_solvers_pin_sweep_timescale_overrides() -> None:
+    expected = {
+        "solver.transport_steps=1",
+        "solver.transport_lr=5e-4",
+        "solver.potential_lr=5e-4",
+        "solver.noise.sigma_start=0.0",
+        "solver.noise.sigma_end=0.0",
+    }
+    for specs in [formulation_suite.SOLVER_SPECS, formulation_suite.SYNTHETIC_SOLVER_SPECS]:
+        for solver in ["monge_map", "otm", "maxcorr"]:
+            assert expected.issubset(set(specs[solver]["extra_overrides"]))
+
+
 def test_formulation_suite_budget_scale_extends_all_direct_rows() -> None:
     scaled = formulation_suite._scale_solver_specs(formulation_suite.SOLVER_SPECS, budget_scale=4.0)
     assert scaled["otp"]["max_steps"] == 16384
