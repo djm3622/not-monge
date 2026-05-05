@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import csv
 import json
 import math
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import torch
+from torch import nn
 from omegaconf import OmegaConf
 
 from src.datasets.celeba import build_image_dataset_bundle
@@ -39,6 +41,29 @@ from src.utils.checkpointing import save_checkpoint
 from src.utils.device import infer_device
 from src.utils.data import maybe_override_batch_size
 from src.utils.seed import seed_all
+
+
+class _DirectPotentialAdapter(nn.Module):
+    """Wrap a direct-solver potential backbone with its solver parameterization."""
+
+    def __init__(
+        self,
+        backbone: nn.Module,
+        *,
+        quadratic_scale: float = 0.0,
+        use_c_concave_parameterization: bool = False,
+    ) -> None:
+        super().__init__()
+        self.backbone = backbone
+        self.quadratic_scale = float(quadratic_scale)
+        self.use_c_concave_parameterization = bool(use_c_concave_parameterization)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        value = self.backbone(x)
+        if not self.use_c_concave_parameterization:
+            return value
+        quadratic = self.quadratic_scale * x.pow(2).sum(dim=-1, keepdim=True)
+        return quadratic - value
 
 
 def resolve_ot_dataset(config: Mapping[str, Any]) -> Any:
@@ -151,6 +176,258 @@ def _cost_equivalent_theorem_objective(
     objective = cost + potential_gap
     value = float(objective.detach())
     return value, value, raw_dot
+
+
+def _target_reference_potential_values_and_gradients(
+    solver: BaseOTSolver,
+    source_potential: torch.nn.Module,
+    *,
+    source: torch.Tensor,
+    target: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    source_values = source_potential(source).view(-1)
+    conjugate = (source * target).sum(dim=-1) - source_values
+    solver_name = str(getattr(solver, "solver_name", "")).lower()
+    if solver_name == "otp" and bool(getattr(solver, "use_c_concave_parameterization", False)):
+        quadratic_scale = float(getattr(solver, "quadratic_scale", 0.5))
+        values = quadratic_scale * target.pow(2).sum(dim=-1) - conjugate
+        gradients = 2.0 * quadratic_scale * target - source
+        return values, gradients
+    if solver_name in {"monge_map", "maxcorr", "otm"}:
+        return conjugate, source
+    raise ValueError(f"Unsupported solver for target potential metrics: '{solver_name}'")
+
+
+def _potential_values_and_gradients(
+    solver: BaseOTSolver,
+    inputs: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    with torch.enable_grad():
+        eval_inputs = inputs.detach().clone().requires_grad_(True)
+        values = solver.compute_potential(eval_inputs)
+        if values is None:
+            return None
+        gradients = torch.autograd.grad(values.view(-1).sum(), eval_inputs)[0]
+    return values.view(-1), gradients
+
+
+def _centered_value_mse(predicted: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+    predicted = predicted.view(-1) - predicted.view(-1).mean()
+    reference = reference.view(-1) - reference.view(-1).mean()
+    return (predicted - reference).pow(2).mean()
+
+
+def _extract_direct_potential_module(solver: BaseOTSolver) -> nn.Module:
+    solver_name = str(getattr(solver, "solver_name", "")).lower()
+    if solver_name not in {"otp", "monge_map", "maxcorr", "otm"}:
+        raise ValueError(f"Unsupported solver for target potential metrics: '{solver_name}'")
+    return _DirectPotentialAdapter(
+        getattr(solver, "potential_backbone"),
+        quadratic_scale=float(getattr(solver, "quadratic_scale", 0.0)),
+        use_c_concave_parameterization=bool(
+            getattr(solver, "use_c_concave_parameterization", False) and solver_name == "otp"
+        ),
+    )
+
+
+def _zero_potential_copy(potential: nn.Module) -> nn.Module:
+    clone = copy.deepcopy(potential)
+    with torch.no_grad():
+        for parameter in clone.parameters():
+            parameter.zero_()
+    return clone
+
+
+def _noisy_potential_copy(
+    potential: nn.Module,
+    *,
+    noise_scale: float,
+    seed: int,
+) -> nn.Module:
+    clone = copy.deepcopy(potential)
+    generator = torch.Generator().manual_seed(seed)
+    with torch.no_grad():
+        for parameter in clone.parameters():
+            if parameter.numel() == 0:
+                continue
+            noise = torch.randn(
+                parameter.shape,
+                generator=generator,
+                device="cpu",
+                dtype=parameter.dtype,
+            ).to(device=parameter.device)
+            parameter.add_(noise_scale * noise)
+    return clone
+
+
+def _empirical_semidual_objective(
+    map_fn: Any,
+    potential: nn.Module,
+    source: torch.Tensor,
+    target: torch.Tensor,
+) -> float:
+    transported = map_fn(source)
+    cost = 0.5 * (source - transported).pow(2).sum(dim=-1).mean()
+    potential_target = potential(target).view(-1).mean()
+    potential_transported = potential(transported).view(-1).mean()
+    return float((cost + potential_target - potential_transported).detach())
+
+
+def _empirical_maxcorr_objective(
+    map_fn: Any,
+    potential: nn.Module,
+    source: torch.Tensor,
+    target: torch.Tensor,
+) -> float:
+    transported = map_fn(source)
+    dot_term = (source * transported).sum(dim=-1).mean()
+    potential_target = potential(target).view(-1).mean()
+    potential_transported = potential(transported).view(-1).mean()
+    return float((dot_term + potential_target - potential_transported).detach())
+
+
+def _summarize_flatness(values: Mapping[str, float], *, final_key: str) -> dict[str, float]:
+    if final_key not in values:
+        raise KeyError(f"final_key '{final_key}' missing from flatness values")
+    tensor = torch.tensor(list(values.values()), dtype=torch.float32)
+    final_value = float(values[final_key])
+    gaps = torch.tensor(
+        [abs(value - final_value) for key, value in values.items() if key != final_key],
+        dtype=torch.float32,
+    )
+    return {
+        "flatness_std_F": float(tensor.std(unbiased=False)),
+        "flatness_range_F": float(tensor.max() - tensor.min()),
+        "flatness_mean_abs_gap_to_final": 0.0 if gaps.numel() == 0 else float(gaps.mean()),
+    }
+
+
+def _collect_target_potential_metric_batch(
+    loader: Any,
+    *,
+    device: torch.device,
+    max_items: int,
+) -> dict[str, torch.Tensor]:
+    batches: list[dict[str, torch.Tensor]] = []
+    collected = 0
+    for batch in loader:
+        remaining = max_items - collected
+        if remaining <= 0:
+            break
+        if "ground_truth_map" not in batch:
+            return {}
+        keep = min(int(batch["source"].shape[0]), remaining)
+        batches.append(
+            {
+                "source": batch["source"][:keep].detach(),
+                "target": batch["ground_truth_map"][:keep].detach(),
+            }
+        )
+        collected += keep
+    if not batches:
+        return {}
+    return {
+        "source": torch.cat([batch["source"] for batch in batches], dim=0).to(device),
+        "target": torch.cat([batch["target"] for batch in batches], dim=0).to(device),
+    }
+
+
+def _build_target_potential_validation_metric_fn(
+    dataset_bundle: Any,
+    config: Mapping[str, Any],
+) -> Any | None:
+    metric_cfg = dict(config.get("training", {}).get("target_potential_metrics", {}))
+    if not bool(metric_cfg.get("enabled", False)):
+        return None
+    ground_truth_potential = getattr(dataset_bundle, "ground_truth_potential", None)
+    if ground_truth_potential is None:
+        return None
+    reference_potential = copy.deepcopy(ground_truth_potential).eval()
+    max_items = int(metric_cfg.get("max_items", 512))
+    if max_items <= 0:
+        return None
+    flatness_enabled = bool(metric_cfg.get("flatness_enabled", True))
+    flatness_noise_scale = float(metric_cfg.get("flatness_noise_scale", 1.0e-2))
+    metric_seed = int(config.get("training", {}).get("seed", 1234))
+    random_potential: nn.Module | None = None
+
+    def metric_fn(
+        solver: BaseOTSolver,
+        val_loader: Any,
+        device: torch.device,
+    ) -> Mapping[str, float]:
+        nonlocal random_potential
+        solver_name = str(getattr(solver, "solver_name", "")).lower()
+        if solver_name not in {"otp", "monge_map", "maxcorr", "otm"}:
+            return {}
+        batch = _collect_target_potential_metric_batch(
+            val_loader,
+            device=device,
+            max_items=max_items,
+        )
+        if not batch:
+            return {}
+        reference_potential.to(device)
+        reference_potential.eval()
+        current = _potential_values_and_gradients(solver, batch["target"])
+        if current is None:
+            return {}
+        current_values, current_gradients = current
+        reference_values, reference_gradients = _target_reference_potential_values_and_gradients(
+            solver,
+            reference_potential,
+            source=batch["source"],
+            target=batch["target"],
+        )
+        value_mse = _centered_value_mse(current_values, reference_values)
+        gradient_mse = (current_gradients - reference_gradients).pow(2).mean()
+        metrics = {
+            "val/target_potential_centered_mse": float(value_mse.detach()),
+            "val/target_potential_gradient_mse": float(gradient_mse.detach()),
+        }
+        if flatness_enabled:
+            current_potential = _extract_direct_potential_module(solver).to(device)
+            current_potential.eval()
+            noisy_potential = _noisy_potential_copy(
+                current_potential,
+                noise_scale=flatness_noise_scale,
+                seed=metric_seed + int(getattr(solver, "train_step_index", 0)),
+            ).to(device)
+            noisy_potential.eval()
+            zero_potential = _zero_potential_copy(current_potential).to(device)
+            zero_potential.eval()
+            if random_potential is None:
+                with torch.random.fork_rng(devices=[]):
+                    torch.manual_seed(metric_seed + 991)
+                    random_solver = build_solver(config["model"], config["solver"], config["training"]).to(device)
+                random_solver.eval()
+                random_potential = _extract_direct_potential_module(random_solver).to(device)
+                random_potential.eval()
+
+            objective_fn = (
+                _empirical_semidual_objective
+                if solver_name in {"otp", "monge_map"}
+                else _empirical_maxcorr_objective
+            )
+            values = {
+                "current": objective_fn(solver.compute_map, current_potential, batch["source"], batch["target"]),
+                "noisy_current": objective_fn(solver.compute_map, noisy_potential, batch["source"], batch["target"]),
+                "random_init": objective_fn(solver.compute_map, random_potential, batch["source"], batch["target"]),
+                "zero": objective_fn(solver.compute_map, zero_potential, batch["source"], batch["target"]),
+            }
+            flatness = _summarize_flatness(values, final_key="current")
+            metrics.update(
+                {
+                    "val/flatness_std_F": float(flatness["flatness_std_F"]),
+                    "val/flatness_range_F": float(flatness["flatness_range_F"]),
+                    "val/flatness_mean_abs_gap_to_current": float(
+                        flatness["flatness_mean_abs_gap_to_final"]
+                    ),
+                }
+            )
+        return metrics
+
+    return metric_fn
 
 
 def evaluate_ot_solver(
@@ -307,7 +584,12 @@ def train_baseline_run(config: Mapping[str, Any], output_root: str | Path) -> di
             output_dir=output_dir,
             full_config=config,
         )
-        final_val_metrics = trainer.fit(solver, train_loader, val_loader)
+        final_val_metrics = trainer.fit(
+            solver,
+            train_loader,
+            val_loader,
+            extra_validation_metrics=_build_target_potential_validation_metric_fn(dataset_bundle, config),
+        )
         device = trainer.device
         checkpoint_dir = output_dir / str(config["training"]["checkpointing"]["dirpath"])
         last_epoch = math.ceil(trainer.global_step / max(len(train_loader), 1))

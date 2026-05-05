@@ -3,7 +3,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, MutableMapping, Protocol
+from typing import Any, Callable, Mapping, MutableMapping, Protocol
 
 import torch
 from torch.utils.data import DataLoader
@@ -175,6 +175,11 @@ class Trainer:
         task: TrainTask,
         train_loader: DataLoader[Mapping[str, torch.Tensor]],
         val_loader: DataLoader[Mapping[str, torch.Tensor]] | None = None,
+        extra_validation_metrics: Callable[
+            [TrainTask, DataLoader[Mapping[str, torch.Tensor]], torch.device],
+            Mapping[str, float],
+        ]
+        | None = None,
     ) -> dict[str, float]:
         seed_all(self.config.seed, deterministic=self.config.deterministic)
 
@@ -218,6 +223,10 @@ class Trainer:
                         for batch in val_loader
                     ]
                 final_val_metrics = mean_metrics(val_metrics)
+                if extra_validation_metrics is not None:
+                    final_val_metrics.update(
+                        dict(extra_validation_metrics(task, val_loader, self.device))
+                    )
                 self.logger.log_metrics(final_val_metrics, step=self.global_step)
                 self._save_epoch_checkpoint(task, epoch + 1, final_val_metrics)
             else:

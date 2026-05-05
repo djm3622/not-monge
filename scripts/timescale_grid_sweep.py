@@ -220,6 +220,8 @@ def _build_grid_config(
     visualize: bool,
     save_epoch_checkpoints: bool,
     extra_overrides: list[str],
+    target_potential_metric_items: int = 512,
+    target_potential_flatness_noise_scale: float = 1.0e-2,
 ) -> dict[str, Any]:
     transport_steps = _effective_transport_steps(solver_name, k_value)
     potential_lr = _effective_potential_lr(
@@ -269,6 +271,12 @@ def _build_grid_config(
     if dataset_name.startswith("synthetic_ot"):
         config["dataset"]["seed"] = int(seed)
     config["visualization"]["enabled"] = bool(visualize)
+    config["training"]["target_potential_metrics"] = {
+        "enabled": int(target_potential_metric_items) > 0,
+        "max_items": int(target_potential_metric_items),
+        "flatness_enabled": int(target_potential_metric_items) > 0,
+        "flatness_noise_scale": float(target_potential_flatness_noise_scale),
+    }
     config["training"]["fairness"]["batch_size"] = int(config["dataset"]["batch_size"])
     config["training"]["fairness"]["max_steps"] = int(config["training"]["max_steps"])
     if not save_epoch_checkpoints:
@@ -451,6 +459,8 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=0)
     parser.add_argument("--steps-per-epoch", type=int, default=0)
     parser.add_argument("--eval-items", type=int, default=4096)
+    parser.add_argument("--target-potential-metric-items", type=int, default=512)
+    parser.add_argument("--target-potential-flatness-noise-scale", type=float, default=1.0e-2)
     parser.add_argument("--cache-version", default=DEFAULT_CACHE_VERSION)
     parser.add_argument("--output-root", default="outputs/timescale_grid")
     parser.add_argument("--device", default="auto")
@@ -539,6 +549,10 @@ def main() -> None:
                             visualize=bool(args.visualize),
                             save_epoch_checkpoints=bool(args.save_epoch_checkpoints),
                             extra_overrides=list(args.override),
+                            target_potential_metric_items=int(args.target_potential_metric_items),
+                            target_potential_flatness_noise_scale=float(
+                                args.target_potential_flatness_noise_scale
+                            ),
                         )
                         if bool(args.no_isolate_runs):
                             result = _run_training_in_process(config, run_dir)
@@ -598,6 +612,8 @@ def main() -> None:
         "max_steps": int(args.max_steps),
         "budget_mode": str(args.budget_mode),
         "eval_items": int(args.eval_items),
+        "target_potential_metric_items": int(args.target_potential_metric_items),
+        "target_potential_flatness_noise_scale": float(args.target_potential_flatness_noise_scale),
         "device": device,
     }
     (output_root / "run_spec.json").write_text(json.dumps(run_spec, indent=2), encoding="utf-8")
