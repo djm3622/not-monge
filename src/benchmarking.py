@@ -320,7 +320,8 @@ def _collect_target_potential_metric_batch(
         batches.append(
             {
                 "source": batch["source"][:keep].detach(),
-                "target": batch["ground_truth_map"][:keep].detach(),
+                "distribution_target": batch["target"][:keep].detach(),
+                "ground_truth_map": batch["ground_truth_map"][:keep].detach(),
             }
         )
         collected += keep
@@ -328,7 +329,11 @@ def _collect_target_potential_metric_batch(
         return {}
     return {
         "source": torch.cat([batch["source"] for batch in batches], dim=0).to(device),
-        "target": torch.cat([batch["target"] for batch in batches], dim=0).to(device),
+        "distribution_target": torch.cat(
+            [batch["distribution_target"] for batch in batches],
+            dim=0,
+        ).to(device),
+        "ground_truth_map": torch.cat([batch["ground_truth_map"] for batch in batches], dim=0).to(device),
     }
 
 
@@ -369,19 +374,44 @@ def _build_target_potential_validation_metric_fn(
             return {}
         reference_potential.to(device)
         reference_potential.eval()
-        current = _potential_values_and_gradients(solver, batch["target"])
+        source = batch["source"]
+        distribution_target = batch["distribution_target"]
+        ground_truth_map = batch["ground_truth_map"]
+        with torch.no_grad():
+            prediction = solver.compute_map(source)
+        transport_cost = 0.5 * (source - prediction).pow(2).sum(dim=-1).mean()
+        optimal_transport_cost = 0.5 * (source - ground_truth_map).pow(2).sum(dim=-1).mean()
+        theorem_objective, theorem_cost_equivalent, dot_reward = _cost_equivalent_theorem_objective(
+            solver,
+            source,
+            prediction,
+            distribution_target,
+        )
+
+        current = _potential_values_and_gradients(solver, ground_truth_map)
         if current is None:
             return {}
         current_values, current_gradients = current
         reference_values, reference_gradients = _target_reference_potential_values_and_gradients(
             solver,
             reference_potential,
-            source=batch["source"],
-            target=batch["target"],
+            source=source,
+            target=ground_truth_map,
         )
         value_mse = _centered_value_mse(current_values, reference_values)
         gradient_mse = (current_gradients - reference_gradients).pow(2).mean()
         metrics = {
+            "val/d_kr": empirical_kr_distance(prediction.detach().cpu(), distribution_target.detach().cpu()),
+            "val/mmd": maximum_mean_discrepancy(prediction.detach().cpu(), distribution_target.detach().cpu()),
+            "val/transport_cost": float(transport_cost.detach()),
+            "val/optimal_transport_cost": float(optimal_transport_cost.detach()),
+            "val/transport_cost_gap": float((transport_cost - optimal_transport_cost).abs().detach()),
+            "val/theorem_objective": theorem_objective,
+            "val/theorem_cost_equivalent": theorem_cost_equivalent,
+            "val/theorem_gap": abs(theorem_cost_equivalent - float(optimal_transport_cost.detach()))
+            if theorem_cost_equivalent is not None
+            else None,
+            "val/dot_reward": dot_reward,
             "val/target_potential_centered_mse": float(value_mse.detach()),
             "val/target_potential_gradient_mse": float(gradient_mse.detach()),
         }
@@ -410,10 +440,10 @@ def _build_target_potential_validation_metric_fn(
                 else _empirical_maxcorr_objective
             )
             values = {
-                "current": objective_fn(solver.compute_map, current_potential, batch["source"], batch["target"]),
-                "noisy_current": objective_fn(solver.compute_map, noisy_potential, batch["source"], batch["target"]),
-                "random_init": objective_fn(solver.compute_map, random_potential, batch["source"], batch["target"]),
-                "zero": objective_fn(solver.compute_map, zero_potential, batch["source"], batch["target"]),
+                "current": objective_fn(solver.compute_map, current_potential, source, distribution_target),
+                "noisy_current": objective_fn(solver.compute_map, noisy_potential, source, distribution_target),
+                "random_init": objective_fn(solver.compute_map, random_potential, source, distribution_target),
+                "zero": objective_fn(solver.compute_map, zero_potential, source, distribution_target),
             }
             flatness = _summarize_flatness(values, final_key="current")
             metrics.update(
