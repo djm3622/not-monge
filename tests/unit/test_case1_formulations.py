@@ -44,11 +44,14 @@ def test_target_reference_potential_matches_solver_parameterization(
 
     assert symbol == expected_symbol
     if solver_name == "otp":
-        expected_values = solver.quadratic_scale * target.pow(2).sum(dim=-1) - conjugate
-        expected_gradients = 2.0 * solver.quadratic_scale * target - source
+        scale = solver.quadratic_scale
+        expected_values = scale * target.pow(2).sum(dim=-1) - 2.0 * scale * conjugate
+        expected_gradients = 2.0 * scale * (target - source)
     else:
-        expected_values = conjugate
-        expected_gradients = source
+        weight = solver.transport_l2_weight
+        scale = solver.dot_reward_scale + weight
+        expected_values = scale * conjugate - 0.5 * weight * target.pow(2).sum(dim=-1)
+        expected_gradients = scale * source - weight * target
 
     assert torch.allclose(reference_values, expected_values)
     assert torch.allclose(reference_gradients, expected_gradients)

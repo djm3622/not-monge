@@ -167,17 +167,13 @@ def target_reference_potential(
     target: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, str]:
     """Construct the canonical target-side potential and its gradient on paired points."""
+    symbol = _target_potential_symbol(solver)
+    reference_fn = getattr(solver, "reference_target_potential", None)
+    if reference_fn is None:
+        raise ValueError(f"Solver '{getattr(solver, 'solver_name', '')}' does not define a target reference potential")
     source_values = source_potential(source).view(-1)
-    conjugate = (source * target).sum(dim=-1) - source_values
-    solver_name = str(getattr(solver, "solver_name", "")).lower()
-    if solver_name == "otp" and bool(getattr(solver, "use_c_concave_parameterization", False)):
-        quadratic_scale = float(getattr(solver, "quadratic_scale", 0.5))
-        values = quadratic_scale * target.pow(2).sum(dim=-1) - conjugate
-        gradients = 2.0 * quadratic_scale * target - source
-        return values, gradients, "psi"
-    values = conjugate
-    gradients = source
-    return values, gradients, _target_potential_symbol(solver)
+    values, gradients = reference_fn(source, target, source_values)
+    return values, gradients, symbol
 
 
 def _make_zero_potential_copy(potential: nn.Module) -> nn.Module:
