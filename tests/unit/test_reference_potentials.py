@@ -95,6 +95,12 @@ def test_reference_potential_makes_true_map_stationary(
     (map_gradient,) = torch.autograd.grad(loss, transported)
     assert torch.allclose(map_gradient, torch.zeros_like(map_gradient), atol=1e-10)
 
+    go_target = solver.gradient_optimality_target(source, target)
+    _, reference_gradients = solver.reference_target_potential(
+        source, target, 0.5 * (source @ matrix * source).sum(dim=-1)
+    )
+    assert torch.allclose(go_target, reference_gradients, atol=1e-10)
+
 
 @pytest.mark.parametrize(("solver_name", "overrides"), _SOLVER_OVERRIDES)
 def test_unit_scale_potential_gap_recovers_unit_reference(

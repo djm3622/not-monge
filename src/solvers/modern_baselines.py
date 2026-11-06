@@ -108,11 +108,17 @@ def _vector_gradient_penalty(
 def _vector_gradient_optimality(
     potential_fn: Any,
     fake_samples: torch.Tensor,
-    source_samples: torch.Tensor,
+    target_gradients: torch.Tensor,
     *,
     coefficient: float,
 ) -> torch.Tensor:
-    """OTM-style gradient optimality penalty matching average source features."""
+    """OTM-style gradient optimality penalty.
+
+    Matches the batch-mean potential gradient at the transported samples to the
+    batch mean of ``target_gradients``, the gradient that makes the current map
+    stationary for the solver's own map objective (see
+    ``OTPMinimaxSolver.gradient_optimality_target``).
+    """
     if coefficient <= 0.0:
         return fake_samples.new_tensor(0.0)
     fake_eval = fake_samples.detach().requires_grad_(True)
@@ -124,7 +130,7 @@ def _vector_gradient_optimality(
         create_graph=True,
         retain_graph=True,
     )[0]
-    return coefficient * (gradients.mean(dim=0) - source_samples.mean(dim=0)).norm()
+    return coefficient * (gradients.mean(dim=0) - target_gradients.detach().mean(dim=0)).norm()
 
 
 class OTPMinimaxSolver(BaseOTSolver):
@@ -246,6 +252,14 @@ class OTPMinimaxSolver(BaseOTSolver):
 
     def compute_potential(self, x: torch.Tensor) -> torch.Tensor | None:
         return self._dual_potential(x)
+
+    def gradient_optimality_target(self, source: torch.Tensor, transported: torch.Tensor) -> torch.Tensor:
+        """Potential gradient at ``transported`` that makes the map step stationary.
+
+        The map step minimises ``c * ||x - T||^2 - f(T)``, so stationarity gives
+        ``grad f(T) = 2c (T - x)``.
+        """
+        return 2.0 * self.quadratic_scale * (transported - source)
 
     def unit_scale_potential_gap(
         self,
@@ -417,6 +431,11 @@ class MaxCorrelationTransportSolver(OTPMinimaxSolver):
         self.transport_l2_weight = float(solver_config.get("transport_l2_weight", 0.0))
         self.dot_reward_scale = float(solver_config.get("dot_reward_scale", 1.0))
 
+    def gradient_optimality_target(self, source: torch.Tensor, transported: torch.Tensor) -> torch.Tensor:
+        """Stationarity of ``g(T) - s <x, T> + lam/2 ||x - T||^2`` gives ``grad g(T) = (s + lam) x - lam T``."""
+        weight = self.transport_l2_weight
+        return (self.dot_reward_scale + weight) * source - weight * transported
+
     def unit_scale_potential_gap(
         self,
         potential_gap: torch.Tensor,
@@ -570,7 +589,7 @@ class OTMTransportSolver(MaxCorrelationTransportSolver):
                     go_penalty = _vector_gradient_optimality(
                         self.compute_potential,
                         transported,
-                        noised_source.detach(),
+                        self.gradient_optimality_target(noised_source.detach(), transported),
                         coefficient=self.gradient_optimality_weight,
                     )
                     potential_loss = potential_gap + go_penalty
@@ -664,7 +683,7 @@ class MongeMapSolver(OTPMinimaxSolver):
                         penalty = _vector_gradient_optimality(
                             self.compute_potential,
                             transported,
-                            noised_source.detach(),
+                            self.gradient_optimality_target(noised_source.detach(), transported),
                             coefficient=self.gradient_optimality_weight,
                         )
                     else:
