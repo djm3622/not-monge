@@ -163,6 +163,11 @@ def _cost_equivalent_theorem_objective(
         return None, None, _raw_dot_reward(source, prediction)
 
     potential_gap = potential_target.view(-1).mean() - potential_prediction.view(-1).mean()
+    unit_scale_fn = getattr(solver, "unit_scale_potential_gap", None)
+    if unit_scale_fn is not None:
+        # Potentials are trained against scaled/regularised objectives; convert the gap
+        # to the unit-scale objective that the cost-equivalent value below assumes.
+        potential_gap = unit_scale_fn(potential_gap, prediction, target)
     raw_dot = _raw_dot_reward(source, prediction)
     solver_name = str(getattr(solver, "solver_name", "")).lower()
     if solver_name in {"maxcorr", "otm"}:
@@ -185,17 +190,13 @@ def _target_reference_potential_values_and_gradients(
     source: torch.Tensor,
     target: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    source_values = source_potential(source).view(-1)
-    conjugate = (source * target).sum(dim=-1) - source_values
+    """Solver-specific canonical target potential (accounts for cost/reward scaling and regularisers)."""
     solver_name = str(getattr(solver, "solver_name", "")).lower()
-    if solver_name == "otp" and bool(getattr(solver, "use_c_concave_parameterization", False)):
-        quadratic_scale = float(getattr(solver, "quadratic_scale", 0.5))
-        values = quadratic_scale * target.pow(2).sum(dim=-1) - conjugate
-        gradients = 2.0 * quadratic_scale * target - source
-        return values, gradients
-    if solver_name in {"monge_map", "maxcorr", "otm"}:
-        return conjugate, source
-    raise ValueError(f"Unsupported solver for target potential metrics: '{solver_name}'")
+    reference_fn = getattr(solver, "reference_target_potential", None)
+    if solver_name not in {"otp", "monge_map", "maxcorr", "otm"} or reference_fn is None:
+        raise ValueError(f"Unsupported solver for target potential metrics: '{solver_name}'")
+    source_values = source_potential(source).view(-1)
+    return reference_fn(source, target, source_values)
 
 
 def _potential_values_and_gradients(
