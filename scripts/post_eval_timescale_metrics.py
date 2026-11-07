@@ -30,6 +30,7 @@ if str(ROOT) not in sys.path:
 import matplotlib  # noqa: E402
 
 matplotlib.use("Agg")
+import matplotlib.colors as mcolors  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 
 from src.evaluation.plotting import apply_publication_axes, save_png_and_pdf  # noqa: E402
@@ -63,6 +64,8 @@ METRIC_GROUPS: dict[str, tuple[str, ...]] = {
 }
 
 HIGHER_IS_BETTER_SUFFIXES = ("cos", "cos_fwd", "precision", "recall")
+LOG_SCALE_SOLVERS = {"monge_map"}
+LOG_SCALE_DYNAMIC_RANGE = 100.0
 
 _GRID_RE = re.compile(r"^k(?P<k>[^_]+)_r(?P<ratio>.+)$")
 _SEED_RE = re.compile(r"^seed(?P<seed>-?\d+)$")
@@ -248,6 +251,25 @@ def _select_metric_names(metric_groups: list[str], explicit_metrics: list[str]) 
     return list(dict.fromkeys(selected))
 
 
+def _parse_ratio_filter(values: list[str]) -> set[float]:
+    return {float(value) for value in values}
+
+
+def _ratio_in_filter(row: dict[str, Any], ratios: set[float]) -> bool:
+    if not ratios:
+        return False
+    ratio = _to_float(row.get("ratio"))
+    return ratio is not None and any(
+        math.isclose(ratio, value, rel_tol=0.0, abs_tol=1.0e-12) for value in ratios
+    )
+
+
+def _exclude_ratios(rows: list[dict[str, Any]], ratios: set[float]) -> list[dict[str, Any]]:
+    if not ratios:
+        return rows
+    return [row for row in rows if not _ratio_in_filter(row, ratios)]
+
+
 def collect_final_metric_rows(
     metrics_files: list[Path],
     metric_names: list[str],
@@ -379,6 +401,20 @@ def _format_mean_std_cell(mean_value: float, std_value: float) -> str:
     return f"{_format_number(mean_value)}\n+/- {_format_number(std_value)}"
 
 
+def _should_use_log_scale(solver: str, values: list[float]) -> bool:
+    if solver not in LOG_SCALE_SOLVERS:
+        return False
+    finite_values = [value for value in values if math.isfinite(value)]
+    if len(finite_values) < 2 or any(value <= 0.0 for value in finite_values):
+        return False
+    return max(finite_values) / min(finite_values) >= LOG_SCALE_DYNAMIC_RANGE
+
+
+def _positive_floor(values: list[float]) -> float:
+    positives = [value for value in values if math.isfinite(value) and value > 0.0]
+    return min(positives) * 0.1 if positives else 1.0e-12
+
+
 def _plot_heatmap(
     rows: list[dict[str, Any]],
     *,
@@ -409,15 +445,23 @@ def _plot_heatmap(
         mean_matrix.append(mean_line)
         std_matrix.append(std_line)
 
-    if not any(math.isfinite(value) for line in mean_matrix for value in line):
+    finite_means = [value for line in mean_matrix for value in line if math.isfinite(value)]
+    if not finite_means:
         return []
+    use_log_scale = _should_use_log_scale(solver, finite_means)
 
     figure_width = max(5.0, 0.55 * len(ratios) + 2.5)
     figure_height = max(3.8, 0.42 * len(k_values) + 1.8)
     figure, axis = plt.subplots(figsize=(figure_width, figure_height))
     cmap = "viridis" if _metric_direction(metric) == "max" else "viridis_r"
-    image = axis.imshow(mean_matrix, aspect="auto", cmap=cmap)
-    figure.colorbar(image, ax=axis, label=f"{_metric_label(metric)} mean")
+    norm = (
+        mcolors.LogNorm(vmin=min(finite_means), vmax=max(finite_means))
+        if use_log_scale
+        else None
+    )
+    image = axis.imshow(mean_matrix, aspect="auto", cmap=cmap, norm=norm)
+    scale_note = " (log scale)" if use_log_scale else ""
+    figure.colorbar(image, ax=axis, label=f"{_metric_label(metric)} mean{scale_note}")
 
     axis.set_xticks(range(len(ratios)))
     axis.set_xticklabels([f"{ratio:g}" for ratio in ratios], rotation=45, ha="right")
@@ -448,6 +492,7 @@ def _plot_heatmap(
             "solver_id": solver,
             "metric": metric,
             "kind": "heatmap",
+            "scale": "log" if use_log_scale else "linear",
             "png_path": str(png_path),
             "pdf_path": str(pdf_path),
         }
@@ -467,6 +512,9 @@ def _plot_ratio_trends(
 
     k_values = sorted({key[0] for key in grouped})
     ratios = sorted({key[1] for key in grouped})
+    grid_means = [_mean_std(values)[0] for values in grouped.values() if values]
+    use_log_scale = _should_use_log_scale(solver, grid_means)
+    log_floor = _positive_floor(grid_means)
     figure, axis = plt.subplots(figsize=(6.4, 4.2))
     plotted = False
 
@@ -482,8 +530,10 @@ def _plot_ratio_trends(
             metric_mean, metric_std = _mean_std(values)
             x_values.append(ratio)
             y_values.append(metric_mean)
-            lower_values.append(metric_mean - metric_std)
-            upper_values.append(metric_mean + metric_std)
+            lower = metric_mean - metric_std
+            upper = metric_mean + metric_std
+            lower_values.append(max(lower, log_floor) if use_log_scale else lower)
+            upper_values.append(max(upper, log_floor) if use_log_scale else upper)
         if not x_values:
             continue
         (line,) = axis.plot(
@@ -511,6 +561,8 @@ def _plot_ratio_trends(
 
     if ratios and all(ratio > 0 for ratio in ratios):
         axis.set_xscale("log")
+    if use_log_scale:
+        axis.set_yscale("log")
     apply_publication_axes(
         axis,
         xlabel="LR ratio",
@@ -538,6 +590,7 @@ def _plot_ratio_trends(
             "solver_id": solver,
             "metric": metric,
             "kind": "ratio_trend",
+            "scale": "log" if use_log_scale else "linear",
             "png_path": str(png_path),
             "pdf_path": str(pdf_path),
         }
@@ -577,6 +630,11 @@ def main() -> None:
     )
     parser.add_argument("--metrics", default="", help="Optional comma-separated extra metric keys.")
     parser.add_argument(
+        "--exclude-ratios",
+        default="",
+        help="Optional comma-separated LR ratios to omit from CSVs and plots.",
+    )
+    parser.add_argument(
         "--plot-root",
         default="outputs/timescale_grid_synthetic_harder_mps_5seed_post_eval",
     )
@@ -589,6 +647,7 @@ def main() -> None:
         _parse_csv_strings(str(args.metric_groups)),
         _parse_csv_strings(str(args.metrics)),
     )
+    excluded_ratios = _parse_ratio_filter(_parse_csv_strings(str(args.exclude_ratios)))
     plot_root = _resolve_path(str(args.plot_root))
 
     metrics_files = _discover_metrics_files(output_roots, solvers=solvers)
@@ -603,6 +662,11 @@ def main() -> None:
     final_rows, best_rows = collect_final_metric_rows(metrics_files, metric_names)
     if not final_rows:
         raise ValueError("No requested metrics were found in the discovered metrics.jsonl files.")
+
+    final_rows = _exclude_ratios(final_rows, excluded_ratios)
+    best_rows = _exclude_ratios(best_rows, excluded_ratios)
+    if not final_rows:
+        raise ValueError("All discovered rows were removed by --exclude-ratios.")
 
     aggregate_rows = aggregate_final_rows(final_rows, metric_names)
     _write_csv(

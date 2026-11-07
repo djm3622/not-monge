@@ -84,3 +84,18 @@ def test_collect_final_metric_rows_and_aggregate_seed_stats(tmp_path: Path) -> N
     map_best = [row for row in best_rows if row["metric"] == "val/map_l2"]
     assert len(map_best) == 2
     assert {row["best_value"] for row in map_best} == {1.0, 3.0}
+
+
+def test_exclude_ratios_removes_requested_grid_values() -> None:
+    rows = [{"ratio": 0.02}, {"ratio": 0.05}, {"ratio": 1.0}]
+
+    filtered = post_eval._exclude_ratios(rows, {0.02})
+
+    assert [row["ratio"] for row in filtered] == [0.05, 1.0]
+
+
+def test_log_scale_is_applied_only_to_unstable_monge_metrics() -> None:
+    assert post_eval._should_use_log_scale("monge_map", [0.1, 20.0])
+    assert not post_eval._should_use_log_scale("monge_map", [0.1, 2.0])
+    assert not post_eval._should_use_log_scale("otp", [0.1, 20.0])
+    assert not post_eval._should_use_log_scale("monge_map", [0.0, 20.0])
