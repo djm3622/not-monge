@@ -1,0 +1,27 @@
+# 1-D Gaussian flatness experiment (Figure 1). Trained from scratch, no checkpoints.
+problem:
+  mean: 2.0          # nu = N(mean, std^2), mu = N(0, 1)
+  std: 1.5
+
+model:
+  width: 64          # plain 1-64-64-1 ReLU MLP for both T and psi
+
+training:
+  map_lr: 1.0e-3     # eta_T; eta_psi = lr_ratio * eta_T
+  potential_steps: 2500
+  batch_size: 512
+  perturb_at: 1500   # psi-step at which the potential parameters are perturbed
+  perturb_std: 0.5
+  freeze_map_after_perturb: false
+
+validation:
+  seed: 12345        # fixed validation sample shared by every run
+  num_samples: 20000
+  grid_points: 2001
+  log_every: 10
+
+sweep:
+  inner_steps: [1, 5, 10, 15, 20]   # K map steps per potential step
+  lr_ratios: [1.0, 0.1, 0.01]       # eta_psi / eta_T
+  seeds: [0, 1, 2, 3, 4]
+  output_dir: outputs/flatness_1d
