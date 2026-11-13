@@ -1,7 +1,7 @@
 """Plot the 1-D Gaussian flatness sweep from its saved ``results.npz``.
 
 Reads the sweep output of ``scripts/flatness_1d_sweep.py`` (or the equivalent
-notebook export) and draws, for each K, the transport error, potential
+notebook export) and draws, for each K, one figure each for the transport error, potential
 gradient error and objective gap |F - W_2^2| against potential steps, as the
 mean +/- std over seeds for every eta_psi / eta_T. Nothing is retrained.
 """
@@ -29,9 +29,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
-from scripts.plot_plots1_2_results import SUMMARY_LEGEND_SIZE, _apply_summary_axes  # noqa: E402
 from scripts.post_eval_timescale_metrics import _positive_floor  # noqa: E402
-from src.evaluation.plotting import save_png_and_pdf  # noqa: E402
+from src.evaluation.plotting import apply_publication_axes, save_png_and_pdf  # noqa: E402
 
 
 PANELS = (
@@ -69,51 +68,58 @@ def _mean_std_band(values: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarr
     return mean, np.maximum(mean - std, floor), mean + std
 
 
-def plot_three_panel(
+def plot_panels(
     results: dict[tuple[int, float], dict[str, np.ndarray]],
     *,
     inner_steps: int,
     perturb_at: int,
     output_dir: Path,
-) -> tuple[Path, Path]:
+) -> list[dict[str, Any]]:
+    """Write one appendix-style figure per panel metric for a single K."""
     ratios = sorted((ratio for k_value, ratio in results if k_value == inner_steps), reverse=True)
-    figure, axes = plt.subplots(1, len(PANELS), figsize=(24.0, 4.6), squeeze=False)
-    legend_entries: dict[str, Any] = {}
-    shared_bounds: list[float] = []
-    for axis, (metric, label) in zip(axes[0], PANELS):
+    bands = {
+        (metric, ratio): _mean_std_band(results[(inner_steps, ratio)][metric])
+        for metric, _ in PANELS
+        for ratio in ratios
+    }
+    shared_values = [
+        value
+        for (metric, _), (_, lower, upper) in bands.items()
+        if metric in SHARED_RANGE_METRICS
+        for value in (float(lower.min()), float(upper.max()))
+    ]
+    manifest: list[dict[str, Any]] = []
+    for panel_index, (metric, label) in enumerate(PANELS):
+        figure, axis = plt.subplots(figsize=(6.4, 4.2))
         for ratio in ratios:
-            series = results[(inner_steps, ratio)]
-            steps = series["step"][0]
-            mean, lower, upper = _mean_std_band(series[metric])
-            (line,) = axis.plot(steps, mean, linewidth=3.0, label=rf"$\eta_\psi / \eta_t = {ratio:g}$")
+            steps = results[(inner_steps, ratio)]["step"][0]
+            mean, lower, upper = bands[(metric, ratio)]
+            (line,) = axis.plot(steps, mean, linewidth=1.8, label=rf"$\eta_\psi / \eta_t = {ratio:g}$")
             axis.fill_between(steps, lower, upper, color=line.get_color(), alpha=0.18, linewidth=0)
-            legend_entries.setdefault(line.get_label(), line)
-            if metric in SHARED_RANGE_METRICS:
-                shared_bounds.extend([float(lower.min()), float(upper.max())])
-        axis.axvline(perturb_at, color="#7f7f7f", linestyle=":", linewidth=2.0)
+        axis.axvline(perturb_at, color="#7f7f7f", linestyle=":", linewidth=1.2)
         axis.set_yscale("log")
-        _apply_summary_axes(axis, xlabel="Potential steps", ylabel=label)
-    for axis, (metric, _) in zip(axes[0], PANELS):
         if metric in SHARED_RANGE_METRICS:
-            axis.set_ylim(min(shared_bounds) * 0.8, max(shared_bounds) * 1.25)
-    figure.legend(
-        list(legend_entries.values()),
-        list(legend_entries.keys()),
-        fontsize=SUMMARY_LEGEND_SIZE,
-        ncols=len(legend_entries),
-        loc="lower center",
-        bbox_to_anchor=(0.5, 0.89),
-        frameon=False,
-        borderaxespad=0.0,
-        handlelength=2.0,
-        handletextpad=0.5,
-        labelspacing=0.25,
-        columnspacing=1.25,
-    )
-    figure.subplots_adjust(left=0.06, right=0.995, bottom=0.2, top=0.84, wspace=0.3)
-    png_path, pdf_path = save_png_and_pdf(figure, output_dir / f"flatness_1d_K{inner_steps}_three_panel")
-    plt.close(figure)
-    return png_path, pdf_path
+            axis.set_ylim(min(shared_values) * 0.8, max(shared_values) * 1.25)
+        apply_publication_axes(axis, xlabel="Potential steps", ylabel=label)
+        axis.legend(
+            fontsize=8,
+            ncols=len(ratios),
+            loc="lower center",
+            bbox_to_anchor=(0.5, 1.02),
+            frameon=False,
+            borderaxespad=0.0,
+            handlelength=1.6,
+            handletextpad=0.45,
+            labelspacing=0.3,
+            columnspacing=1.0,
+        )
+        stem = output_dir / f"flatness_1d_K{inner_steps}_{'abc'[panel_index]}_{metric}"
+        png_path, pdf_path = save_png_and_pdf(figure, stem)
+        plt.close(figure)
+        manifest.append(
+            {"inner_steps": inner_steps, "metric": metric, "png_path": str(png_path), "pdf_path": str(pdf_path)}
+        )
+    return manifest
 
 
 def main() -> None:
@@ -132,10 +138,9 @@ def main() -> None:
 
     manifest = []
     for inner_steps in k_values:
-        png_path, pdf_path = plot_three_panel(
-            results, inner_steps=inner_steps, perturb_at=perturb_at, output_dir=output_dir
+        manifest.extend(
+            plot_panels(results, inner_steps=inner_steps, perturb_at=perturb_at, output_dir=output_dir)
         )
-        manifest.append({"inner_steps": inner_steps, "png_path": str(png_path), "pdf_path": str(pdf_path)})
     (output_dir / "plot_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     print(json.dumps({"output_dir": str(output_dir), "plots": len(manifest)}, indent=2))
 
